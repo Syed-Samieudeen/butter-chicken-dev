@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Butter Chicken</title><desc id="desc">Local chat for two people. A charcoal design with an amber wordmark and a simple conversation illustration.</desc>
+  <rect width="1200" height="630" fill="#242725"/>
+  <path d="M76 79h1048M76 552h1048" stroke="#444943"/>
+  <text x="76" y="146" fill="#efad53" font-family="Georgia,serif" font-size="36" font-weight="bold">bc</text>
+  <text x="76" y="251" fill="#edeef0" font-family="Georgia,serif" font-size="76">Butter Chicken.</text>
+  <text x="79" y="314" fill="#a1a6af" font-family="sans-serif" font-size="25">Your local conversation. Just you two.</text>
+  <text x="79" y="464" fill="#edeef0" font-family="sans-serif" font-size="20">Verified devices</text>
+  <text x="79" y="497" fill="#a1a6af" font-family="sans-serif" font-size="20">Encrypted messages on your own Wi-Fi</text>
+  <rect x="844" y="341" width="280" height="74" rx="4" fill="#2c302d" stroke="#444943"/>
+  <path d="M1110 415v14l-18-14" fill="#2c302d" stroke="#444943"/>
+  <rect x="898" y="440" width="226" height="74" rx="4" fill="#efb869"/>
+  <path d="M912 514v14l18-14" fill="#efb869"/>
+  <path d="M867 368h198m-198 20h128" stroke="#a1a6af" stroke-width="4"/>
+  <path d="M920 467h168m-168 20h101" stroke="#765933" stroke-width="4"/>
+</svg>

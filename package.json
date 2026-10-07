@@ -1,0 +1,74 @@
+{
+  "name": "butter-chicken",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Two-person end-to-end encrypted chat over LAN or a self-hosted internet relay.",
+  "engines": {
+    "node": ">=24.0.0 <25"
+  },
+  "scripts": {
+    "dev": "node --import tsx server/index.ts --dev",
+    "build": "vite build && tsc -p tsconfig.server.json",
+    "start": "node dist/server/index.js",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:browser": "node --import tsx tests/browser.ts",
+    "check": "npm run typecheck && npm run build && npm test",
+    "package": "node scripts/package.mjs",
+    "test:security": "node --import tsx --test tests/security.test.ts tests/network.test.ts tests/crypto.test.ts tests/store.test.ts tests/cli.test.ts tests/relay.test.ts tests/tls.test.ts",
+    "audit:security": "node scripts/security-check.mjs",
+    "pack:release": "npm run build && npm pack --ignore-scripts",
+    "format": "prettier --write client server shared relay tests scripts bin docs *.md package.json index.html vite.config.ts tsconfig*.json",
+    "format:check": "prettier --check client server shared relay tests scripts bin docs *.md package.json index.html vite.config.ts tsconfig*.json",
+    "test:install": "node --import tsx tests/global-install.ts",
+    "relay:dev": "node --import tsx relay/index.ts --dev",
+    "relay:start": "node dist/relay/index.js",
+    "test:relay": "node --import tsx --test tests/relay.test.ts"
+  },
+  "dependencies": {
+    "@zxing/browser": "0.1.5",
+    "@zxing/library": "0.21.3",
+    "bonjour-service": "1.4.4",
+    "libsodium-wrappers-sumo": "0.8.4",
+    "qrcode": "1.5.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "ws": "8.22.0",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "@types/libsodium-wrappers-sumo": "0.7.8",
+    "@types/node": "24.10.1",
+    "@types/qrcode": "1.5.6",
+    "@types/react": "19.2.7",
+    "@types/react-dom": "19.2.3",
+    "@types/ws": "8.18.1",
+    "playwright": "1.63.0",
+    "prettier": "3.5.3",
+    "tsx": "4.23.15",
+    "typescript": "5.9.3",
+    "vite": "8.3.3"
+  },
+  "bin": {
+    "butter-chicken": "bin/butter-chicken.mjs"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "README.md",
+    "SECURITY.md",
+    "SECURITY_AUDIT.md",
+    "TROUBLESHOOTING.md",
+    "docs",
+    ".env.example",
+    "npm-shrinkwrap.json",
+    "THREAT_MODEL.md",
+    "PRIVACY.md",
+    "relay/README.md",
+    "relay/Dockerfile",
+    "relay/compose.yaml",
+    "relay/Caddyfile",
+    "relay/.env.example"
+  ]
+}
