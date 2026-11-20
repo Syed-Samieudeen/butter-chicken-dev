@@ -192,10 +192,10 @@ export function InfoPage({
       <div className="page-heading">
         <span className="eyebrow">
           {!known
-            ? "404 · PAGE NOT FOUND"
+            ? "404 · Page not found"
             : path === "/thank-you"
-              ? "PAIRING CONFIRMATION"
-              : "BUTTER CHICKEN GUIDE"}
+              ? "Pairing confirmation"
+              : "Butter Chicken guide"}
         </span>
         <h2>{headline}</h2>
         <p>

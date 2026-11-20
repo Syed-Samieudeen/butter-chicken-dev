@@ -240,10 +240,10 @@ export default function App() {
           Butter
           <br />
           Chicken<span className="wordmark-dot">.</span>
-          <span className="edition">PRIVATE TWO-PERSON CHAT</span>
+          <span className="edition">Private two-person chat</span>
         </div>
         <div className="sidebar-label">
-          <span>YOUR CONVERSATION</span>
+          <span>Your conversation</span>
           <LockKeyhole size={14} />
         </div>
         {s.friend ? (
@@ -577,7 +577,7 @@ function AuthGate({
       <div className="auth-intro">
         <div className="eyebrow">
           <span />
-          WELCOME TO BUTTER CHICKEN
+          Welcome to Butter Chicken
         </div>
         <h2>
           A little space.
@@ -828,7 +828,17 @@ function ChatView({
                               : "Waiting for delivery"
                         }
                       >
-                        {m.state ?? (m.delivered ? "DELIVERED" : "QUEUED")}
+                        {(
+                          {
+                            QUEUED: "Queued",
+                            SENDING: "Sending",
+                            SENT: "Sent",
+                            DELIVERED: "Delivered",
+                            READ: "Read",
+                            FAILED: "Failed",
+                          } as Record<string, string>
+                        )[m.state ?? (m.delivered ? "DELIVERED" : "QUEUED")] ??
+                          "Queued"}
                       </span>
                     ) : null}
                   </div>
@@ -937,7 +947,7 @@ function PairView({
   return (
     <section className="page-scroll">
       <div className="page-heading">
-        <span className="eyebrow">PAIR WITH A CODE</span>
+        <span className="eyebrow">Pair with a code</span>
         <h2>Connect with your friend</h2>
         <p>
           One person creates a 6-digit code. The other enters it. Then you both
@@ -968,7 +978,7 @@ function PairView({
           <div className="card-icon">
             <ShieldCheck size={28} />
           </div>
-          <span className="eyebrow">CONFIRM THE SECURITY CODE</span>
+          <span className="eyebrow">Confirm the security code</span>
           <h3>Is this really {s.pending.displayName}?</h3>
           <p>
             Read every group below to your friend on a call or in person. Both
@@ -1022,7 +1032,7 @@ function PairView({
         <div className="pair-grid">
           <div className="card invite-card">
             <div className="step-label">
-              <span>01</span>CREATE A CODE
+              <span>01</span>Create a code
             </div>
             <h3>Show a code to your friend</h3>
             <p>Share this 6-digit code only with the person you want to connect with. It works once and expires in 10 minutes.</p>
@@ -1078,7 +1088,7 @@ function PairView({
             }}
           >
             <div className="step-label">
-              <span>02</span>ENTER A FRIEND’S CODE
+              <span>02</span>Enter a friend’s code
             </div>
             <h3>Have a code?</h3>
             <p>Type the 6 digits your friend shows you.</p>
@@ -1136,7 +1146,7 @@ function SecurityView({
   return (
     <section className="page-scroll">
       <div className="page-heading">
-        <span className="eyebrow">KNOW WHO’S ON THE OTHER SIDE</span>
+        <span className="eyebrow">Know who’s on the other side</span>
         <h2>Your connection, verified</h2>
         <p>
           Your friend is recognised by their saved identity, even when their network or device changes.
@@ -1242,7 +1252,7 @@ function SettingsView({
   return (
     <section className="page-scroll settings-page">
       <div className="page-heading">
-        <span className="eyebrow">ON YOUR TERMS</span>
+        <span className="eyebrow">On your terms</span>
         <h2>Make yourself at home</h2>
         <p>Your device. Your identity. Your conversation.</p>
       </div>
