@@ -6,6 +6,12 @@
   box-sizing: border-box;
 }
 
+html,
+body {
+  height: 100%;
+  overflow: hidden;
+}
+
 body {
   margin: 0;
   font:
@@ -89,6 +95,7 @@ code {
   display: grid;
   grid-template-columns: 72px 272px minmax(0, 1fr);
   height: 100dvh;
+  max-height: 100dvh;
   overflow: hidden;
 }
 
@@ -409,7 +416,9 @@ code {
   display: flex;
   flex-direction: column;
   min-width: 0;
+  min-height: 0;
   height: 100%;
+  overflow: hidden;
   background: var(--bg);
 }
 
@@ -486,13 +495,16 @@ code {
 
 /* Auth / intro */
 .auth-page {
+  flex: 1;
+  min-height: 0;
   display: grid;
   grid-template-columns: minmax(240px, 1fr) minmax(320px, 400px);
   align-items: center;
+  align-content: center;
   gap: 48px;
   max-width: 1040px;
   padding: 48px;
-  margin: auto;
+  margin: 0 auto;
   width: 100%;
   overflow: auto;
 }
@@ -814,6 +826,9 @@ select {
 
 /* States */
 .loading-skeleton {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   width: min(680px, 100%);
   padding: 48px;
   margin: auto;
@@ -869,15 +884,20 @@ select {
 }
 
 .fatal-state {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
   margin: auto;
   display: flex;
   align-items: center;
   flex-direction: column;
+  justify-content: center;
   text-align: center;
   gap: 16px;
   color: var(--muted);
   max-width: 400px;
   padding: 24px;
+  width: 100%;
 }
 
 .spin {
@@ -1016,6 +1036,7 @@ select {
   min-height: 0;
   display: flex;
   flex-direction: column;
+  overflow: hidden;
 }
 
 .conversation-banner {
