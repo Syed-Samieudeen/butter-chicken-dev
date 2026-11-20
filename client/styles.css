@@ -1161,11 +1161,21 @@ select {
 }
 
 .message-bubble .reply-quote {
+  display: block;
+  width: 100%;
+  text-align: left;
+  border: 0;
   border-left: 2px solid var(--accent);
   padding: 4px 8px;
   margin-bottom: 6px;
   border-radius: 0 6px 6px 0;
   background: color-mix(in srgb, var(--text) 5%, transparent);
+  cursor: pointer;
+  font: inherit;
+}
+
+.message-bubble .reply-quote:hover {
+  background: color-mix(in srgb, var(--text) 9%, transparent);
 }
 
 .message-bubble .reply-quote p {
@@ -1175,6 +1185,11 @@ select {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.message-row.reply-target .message-bubble {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }
 
 .mine .message-bubble .reply-quote {

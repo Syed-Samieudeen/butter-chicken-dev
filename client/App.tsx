@@ -812,6 +812,7 @@ function ChatView({
                 </div>
               ) : null}
               <div
+                id={`msg-${m.id}`}
                 className={`message-row ${m.from === "me" ? "mine" : "theirs"}`}
                 title="Double-click to reply"
                 onDoubleClick={() => startReply(m)}
@@ -824,9 +825,23 @@ function ChatView({
                     {m.from === "me" ? "You" : s.friend?.displayName}:{" "}
                   </span>
                   {m.replyTo && m.replyPreview ? (
-                    <div className="reply-quote" aria-label="Replying to a message">
+                    <button
+                      type="button"
+                      className="reply-quote"
+                      aria-label="Go to replied message"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        if (!m.replyTo) return;
+                        const el = document.getElementById(`msg-${m.replyTo}`);
+                        if (!el) return;
+                        el.scrollIntoView({ block: "center", behavior: "smooth" });
+                        el.classList.add("reply-target");
+                        window.setTimeout(() => el.classList.remove("reply-target"), 1200);
+                      }}
+                      onDoubleClick={(e) => e.stopPropagation()}
+                    >
                       <p>{m.replyPreview}</p>
-                    </div>
+                    </button>
                   ) : null}
                   <p>{m.text}</p>
                   <div className="message-meta">

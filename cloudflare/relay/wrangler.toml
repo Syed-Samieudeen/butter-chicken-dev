@@ -3,6 +3,15 @@ main = "src/index.ts"
 compatibility_date = "2026-10-07"
 compatibility_flags = ["nodejs_compat"]
 
+[observability]
+enabled = true
+head_sampling_rate = 1
+
+[observability.logs]
+enabled = true
+head_sampling_rate = 1
+invocation_logs = true
+
 [vars]
 # Canonical public relay URL. Must match the URL clients configure and sign against.
 RELAY_PUBLIC_URL = "wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay"
