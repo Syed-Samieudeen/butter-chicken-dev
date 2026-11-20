@@ -7,7 +7,6 @@ import {
 import {
   createHash,
   randomBytes,
-  randomUUID,
   timingSafeEqual,
 } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
@@ -16,19 +15,10 @@ import { WebSocket, WebSocketServer } from "ws";
 import { z } from "zod";
 import { Store } from "./store.js";
 import {
-  Discovery,
-  chooseBind,
-  isLocalIPv4,
-  lanAddresses,
-} from "./discovery.js";
-import {
   ArchiveSchema,
   LocalCommandSchema,
   MAX_FRAME_BYTES,
   MessageId,
-  parseFrame,
-  type Endpoint,
-  type Frame,
   type ServerEvent,
 } from "../shared/protocol.js";
 import {
@@ -75,14 +65,10 @@ function pageHtml(html: string, path: string, origin: string): string {
 
 export interface AppOptions {
   uiPort?: number;
-  lanPort?: number;
-  lanHost?: string;
   dataFile: string;
-  discovery?: boolean;
   development?: boolean;
-  relayUrl?: string;
+  relayUrl: string;
   relayDevelopment?: boolean;
-  onRelayFrame?: (frame: Frame) => void;
 }
 const listen = (
   server: ReturnType<typeof createServer>,
@@ -121,42 +107,26 @@ async function body(req: IncomingMessage): Promise<unknown> {
   return parseStrictJson(Buffer.concat(chunks).toString("utf8"));
 }
 
-/** A browser UI on loopback, plus a separate LAN listener. Neither decrypts chat/vault data. */
+/** Loopback UI and a relay bridge. Neither decrypts chat or vault data. */
 export async function createApp(options: AppOptions) {
-  if (options.relayUrl) {
-    RelayUrl.parse(options.relayUrl);
-    if (
-      options.relayUrl.startsWith("ws:") &&
-      !options.development &&
-      !options.relayDevelopment
-    )
-      throw new Error("WSS required");
-  }
+  RelayUrl.parse(options.relayUrl);
+  if (
+    options.relayUrl.startsWith("ws:") &&
+    !options.development &&
+    !options.relayDevelopment
+  )
+    throw new Error("WSS required");
   const store = new Store(options.dataFile);
   let relay: WebSocket | undefined;
-  const relayPeers = new Set<string>();
   const cookie = randomBytes(32).toString("hex");
   const csrf = randomBytes(32).toString("hex");
   let dataEpoch = randomBytes(16).toString("hex");
   const hosts = new Set<string>();
   const origins = new Set<string>();
-  const bind = chooseBind(options.lanHost);
-  let endpoint: Endpoint = {
-    host: bind === "0.0.0.0" ? (lanAddresses()[0] ?? "127.0.0.1") : bind,
-    port: 0,
-    nodeId: store.nodeId(),
-  };
-  let discovery: Discovery;
   let local: WebSocket | undefined;
-  const peers = new Map<string, WebSocket>();
   const localWss = new WebSocketServer({
     noServer: true,
     maxPayload: MAX_FRAME_BYTES + 4096,
-    perMessageDeflate: false,
-  });
-  const lanWss = new WebSocketServer({
-    noServer: true,
-    maxPayload: MAX_FRAME_BYTES,
     perMessageDeflate: false,
   });
   const emit = (event: ServerEvent) => {
@@ -166,21 +136,12 @@ export async function createApp(options: AppOptions) {
     )
       local.send(JSON.stringify(event));
   };
-  const emitNetwork = () =>
-    emit({
-      type: "network",
-      endpoint,
-      devices: [...(discovery?.devices.values() ?? [])],
-    });
   const disconnectAll = () => {
-    for (const ws of peers.values()) ws.close(1000);
-    peers.clear();
     if (relay) {
       relay.close();
       emit({ type: "relay-close" });
     }
     relay = undefined;
-    relayPeers.clear();
   };
   const authorized = (req: IncomingMessage) =>
     (req.headers.cookie ?? "")
@@ -211,7 +172,7 @@ export async function createApp(options: AppOptions) {
     res.setHeader("X-Robots-Tag", "noindex, nofollow, noarchive");
     res.setHeader(
       "Permissions-Policy",
-      "microphone=(), geolocation=(), camera=(self)",
+      "microphone=(), geolocation=(), camera=()",
     );
     res.setHeader(
       "Content-Security-Policy",
@@ -239,9 +200,9 @@ export async function createApp(options: AppOptions) {
       if (pathname === "/api/status")
         return json(res, 200, {
           application: "Butter Chicken",
-          uiPort,
-          endpoint,
+          uiPort: options.uiPort,
           hasVault,
+          relayUrl: options.relayUrl,
         });
       res.setHeader(
         "Set-Cookie",
@@ -250,11 +211,7 @@ export async function createApp(options: AppOptions) {
       return json(res, 200, {
         csrf,
         dataEpoch,
-        endpoint,
         hasVault,
-        discoveryEnabled:
-          options.discovery !== false && !bind.startsWith("127."),
-        lanBind: bind,
         relayUrl: options.relayUrl,
       });
     }
@@ -389,29 +346,16 @@ export async function createApp(options: AppOptions) {
       json(res, 503, { error: "Run npm run build before npm start" });
     }
   });
-  const lan = createServer((_req, res) =>
-    json(res, 404, { error: "LAN WebSocket transport only" }),
-  );
-  // Bound unauthenticated HTTP/TCP resources as well as upgraded WebSocket peers.
-  for (const server of [ui, lan]) {
-    server.maxConnections = 64;
-    server.maxHeadersCount = 32;
-    server.headersTimeout = 10_000;
-    server.requestTimeout = 15_000;
-    server.keepAliveTimeout = 5000;
-    server.setTimeout(15_000, (socket) => socket.destroy());
-  }
+  ui.maxConnections = 64;
+  ui.maxHeadersCount = 32;
+  ui.headersTimeout = 10_000;
+  ui.requestTimeout = 15_000;
+  ui.keepAliveTimeout = 5000;
+  ui.setTimeout(15_000, (socket) => socket.destroy());
   const uiPort = await listen(ui, options.uiPort ?? 3000, "127.0.0.1");
   for (const host of [`localhost:${uiPort}`, `127.0.0.1:${uiPort}`]) {
     hosts.add(host);
     origins.add(`http://${host}`);
-  }
-  try {
-    endpoint.port = await listen(lan, options.lanPort ?? 4455, bind);
-  } catch (error) {
-    ui.close();
-    store.close();
-    throw error;
   }
   if (options.development) {
     const { createServer: createVite } = await import("vite");
@@ -425,194 +369,52 @@ export async function createApp(options: AppOptions) {
       appType: "spa",
     });
   }
-  discovery = new Discovery(endpoint, emitNetwork, options.discovery !== false);
-  function attachPeer(
-    ws: WebSocket,
-    outbound: boolean,
-    address: string,
-    port: number,
-    requestId?: string,
-  ) {
-    const connectionId = randomUUID();
-    peers.set(connectionId, ws);
-    let tick = Date.now();
-    let frames = 0;
-    let alive = true;
-    ws.on("pong", () => {
-      alive = true;
+  const openRelay = () => {
+    if (!options.relayUrl || (relay && [0, 1].includes(relay.readyState)))
+      return;
+    const link = new WebSocket(options.relayUrl, {
+      handshakeTimeout: 5000,
+      maxPayload: MAX_FRAME_BYTES + 4096,
+      perMessageDeflate: false,
+      followRedirects: false,
     });
-    ws.on("message", (raw, binary) => {
+    relay = link;
+    link.on("message", (raw, binary) => {
       try {
-        if (Date.now() - tick > 1000) {
-          frames = 0;
-          tick = Date.now();
-        }
-        if (
-          binary ||
-          ++frames > 100 ||
-          !local ||
-          local.bufferedAmount > 1_048_576
-        )
-          throw new Error("Transport limit");
-        const frame = parseFrame(raw.toString());
-        options.onRelayFrame?.(frame);
-        emit({ type: "frame", connectionId, frame });
+        if (binary || !local || local.bufferedAmount > 1_048_576)
+          throw Error();
+        const packet = parseStrictJson(raw.toString());
+        emit({ type: "relay", packet });
       } catch {
-        ws.close(1008, "Invalid protocol frame");
+        link.close(1008);
       }
     });
-    ws.on("close", () => {
-      peers.delete(connectionId);
-      emit({ type: "peer-close", connectionId });
-    });
-    ws.on("error", () => {});
-    const timer = setInterval(() => {
-      if (!alive) ws.terminate();
-      else {
-        alive = false;
-        ws.ping();
+    link.on("close", () => {
+      if (relay === link) {
+        relay = undefined;
+        emit({ type: "relay-close" });
       }
-    }, 15_000);
-    timer.unref();
-    ws.once("close", () => clearInterval(timer));
-    emit({
-      type: "peer-open",
-      connectionId,
-      outbound,
-      requestId,
-      address,
-      port,
     });
-  }
-  let attempts = 0;
-  let attemptWindow = Date.now();
+    link.on("error", () => {});
+  };
   localWss.on("connection", (ws) => {
     if (local?.readyState === WebSocket.OPEN) {
       ws.close(4009, "Already open in another tab");
       return;
     }
     local = ws;
-    emitNetwork();
+    emit({ type: "relay-close" });
     ws.on("message", (raw) => {
       try {
         const command = LocalCommandSchema.parse(
           parseStrictJson(raw.toString()),
         );
-        if (command.type === "relay-open") {
-          if (!options.relayUrl || (relay && [0, 1].includes(relay.readyState)))
-            return;
-          const link = new WebSocket(options.relayUrl, {
-            handshakeTimeout: 5000,
-            maxPayload: MAX_FRAME_BYTES + 4096,
-            perMessageDeflate: false,
-            followRedirects: false,
-          });
-          relay = link;
-          link.on("message", (raw, binary) => {
-            try {
-              if (binary || !local || local.bufferedAmount > 1_048_576)
-                throw Error();
-              const packet = parseStrictJson(raw.toString()) as any;
-              if (
-                packet.type === "peer-open" &&
-                typeof packet.connectionId === "string"
-              )
-                relayPeers.add(packet.connectionId);
-              if (packet.type === "peer-close")
-                relayPeers.delete(packet.connectionId);
-              emit({ type: "relay", packet });
-            } catch {
-              link.close(1008);
-            }
-          });
-          link.on("close", () => {
-            if (relay === link) {
-              relay = undefined;
-              relayPeers.clear();
-              emit({ type: "relay-close" });
-            }
-          });
-          link.on("error", () => {});
-        } else if (command.type === "relay-send") {
+        if (command.type === "relay-open") openRelay();
+        else if (command.type === "relay-send") {
           const packet = RelayCommand.parse(command.packet);
           if (relay?.readyState === 1 && relay.bufferedAmount < 1_048_576)
             relay.send(JSON.stringify(packet));
-        } else if (command.type === "send") {
-          if (relayPeers.has(command.connectionId)) {
-            if (relay?.readyState === 1)
-              relay.send(
-                JSON.stringify({
-                  type: "frame",
-                  connectionId: command.connectionId,
-                  frame: command.frame,
-                }),
-              );
-            return;
-          }
-          const peer = peers.get(command.connectionId);
-          if (
-            peer?.readyState === WebSocket.OPEN &&
-            peer.bufferedAmount < 1_048_576
-          ) {
-            const rawFrame = JSON.stringify(command.frame);
-            if (Buffer.byteLength(rawFrame) > MAX_FRAME_BYTES)
-              throw new Error("Too large");
-            options.onRelayFrame?.(command.frame);
-            peer.send(rawFrame);
-          }
-        } else if (command.type === "disconnect") {
-          if (
-            relayPeers.delete(command.connectionId) &&
-            relay?.readyState === 1
-          )
-            relay.send(
-              JSON.stringify({
-                type: "drop",
-                connectionId: command.connectionId,
-              }),
-            );
-          peers.get(command.connectionId)?.close(1000);
         } else if (command.type === "disconnect-all") disconnectAll();
-        else if (command.type === "connect") {
-          if (Date.now() - attemptWindow > 60_000) {
-            attempts = 0;
-            attemptWindow = Date.now();
-          }
-          const host =
-            command.host === "localhost" ? "127.0.0.1" : command.host;
-          if (!isLocalIPv4(host) || peers.size >= 8 || ++attempts > 20) {
-            emit({
-              type: "error",
-              code: "LAN_ENDPOINT_REQUIRED",
-              requestId: command.requestId,
-            });
-            return;
-          }
-          const peer = new WebSocket(`ws://${host}:${command.port}/lan`, {
-            handshakeTimeout: 5000,
-            maxPayload: MAX_FRAME_BYTES,
-            perMessageDeflate: false,
-          });
-          const pendingId = randomUUID();
-          peers.set(pendingId, peer);
-          peer.once("open", () => {
-            peers.delete(pendingId);
-            if (!local) {
-              peer.close();
-              return;
-            }
-            attachPeer(peer, true, host, command.port, command.requestId);
-          });
-          peer.once("error", () => {
-            peers.delete(pendingId);
-            emit({
-              type: "error",
-              code: "CONNECTION_FAILED",
-              requestId: command.requestId,
-            });
-          });
-          peer.once("close", () => peers.delete(pendingId));
-        }
       } catch {
         emit({ type: "error", code: "INVALID_LOCAL_COMMAND" });
       }
@@ -638,40 +440,17 @@ export async function createApp(options: AppOptions) {
       localWss.emit("connection", ws, req),
     );
   });
-  lan.on("upgrade", (req, socket, head) => {
-    const address = (req.socket.remoteAddress ?? "").replace(/^::ffff:/, "");
-    if (
-      req.url !== "/lan" ||
-      req.headers.origin ||
-      !isLocalIPv4(address) ||
-      !local ||
-      peers.size >= 8
-    ) {
-      socket.destroy();
-      return;
-    }
-    lanWss.handleUpgrade(req, socket, head, (ws) =>
-      attachPeer(ws, false, address, req.socket.remotePort ?? 0),
-    );
-  });
   return {
     uiPort,
-    endpoint,
     store,
     async close() {
-      discovery.close();
       relay?.terminate();
-      for (const peer of peers.values()) peer.terminate();
-      peers.clear();
+      relay = undefined;
       local?.terminate();
       local = undefined;
       localWss.close();
-      lanWss.close();
       await vite?.close();
-      await Promise.all([
-        new Promise<void>((r) => ui.close(() => r())),
-        new Promise<void>((r) => lan.close(() => r())),
-      ]);
+      await new Promise<void>((r) => ui.close(() => r()));
       store.close();
     },
   };

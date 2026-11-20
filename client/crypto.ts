@@ -1,4 +1,3 @@
-import { isLocalIPv4 } from "../shared/address.js";
 import sodium from "libsodium-wrappers-sumo";
 import { z } from "zod";
 import { parseStrictJson } from "../shared/json.js";
@@ -6,14 +5,12 @@ import {
   ArchiveSchema,
   EncryptedBlobSchema,
   EnvelopeSchema,
-  EndpointSchema,
   HelloSchema,
   IdentitySchema,
   VaultSchema,
   type Archive,
   type EncryptedBlob,
   type Envelope,
-  type Endpoint,
   type Hello,
   type PublicIdentity,
   type Vault,
@@ -57,7 +54,6 @@ export const FriendSchema = z
     verifiedAt: z.string().datetime(),
     receivedSequence: z.number().int().nonnegative().safe().optional(),
     lastSeen: z.string().datetime().optional(),
-    endpoint: EndpointSchema,
     pairId: z
       .string()
       .regex(/^[a-f0-9]{32}$/)
@@ -335,6 +331,18 @@ export async function unlockVault(
     );
   }
 }
+/** Checks the passphrase against the derived vault key kept in memory. */
+export async function verifyPassphrase(
+  unlocked: UnlockedVault,
+  passphrase: string,
+): Promise<boolean> {
+  const key = await derive(passphrase, unlocked.salt);
+  try {
+    return sodium.memcmp(key, unlocked.key);
+  } finally {
+    sodium.memzero(key);
+  }
+}
 export function wipe(unlocked: UnlockedVault): void {
   for (const key of [
     unlocked.key,
@@ -517,7 +525,6 @@ const InviteSchema = z
     kind: z.literal("invite"),
     relayUrl: RelayUrl.optional(),
     identity: IdentitySchema,
-    endpoint: EndpointSchema,
     token: z.string().length(43),
     inviteId: z.string().regex(/^[a-f0-9]{32}$/),
     expires: z.number().int().positive(),
@@ -531,26 +538,22 @@ const inviteInput = (i: Omit<Invitation, "signature">) => [
   i.identity.id,
   i.identity.boxKey,
   i.identity.signKey,
-  i.endpoint.host,
-  i.endpoint.port,
-  i.endpoint.nodeId,
   i.token,
   i.inviteId,
   i.expires,
   ...(i.relayUrl ? ["relay", i.relayUrl] : []),
 ];
+/** Signed invitation. People never see its text: it is stored on the relay behind a 6-digit code. */
 export function makeInvitation(
   identity: SecretIdentity,
-  endpoint: Endpoint,
+  relayUrl: string,
   now = Date.now(),
-  relayUrl?: string,
-): { invitation: Invitation; code: string } {
+): { invitation: Invitation; text: string } {
   const input = {
     version: 1 as const,
     kind: "invite" as const,
     identity: identity.public,
-    endpoint,
-    ...(relayUrl ? { relayUrl: RelayUrl.parse(relayUrl) } : {}),
+    relayUrl: RelayUrl.parse(relayUrl),
     token: randomChallenge(),
     inviteId: randomId(),
     expires: now + 10 * 60_000,
@@ -564,22 +567,20 @@ export function makeInvitation(
       ),
     ),
   };
-  return { invitation, code: `BC1.${base64(encode(invitation))}` };
+  return { invitation, text: `BC1.${base64(encode(invitation))}` };
 }
-export function parseInvitation(code: string, now = Date.now()): Invitation {
-  if (!code.trim().startsWith("BC1.") || code.length > 3000)
-    throw new Error("Paste a complete Butter Chicken invitation");
-  const invitation = InviteSchema.parse(decode(bytes(code.trim().slice(4))));
+export function parseInvitation(text: string, now = Date.now()): Invitation {
+  if (!text.startsWith("BC1.") || text.length > 3000)
+    throw new Error("The pairing data is not valid.");
+  const invitation = InviteSchema.parse(decode(bytes(text.slice(4))));
   validateIdentity(invitation.identity);
-  if (!isLocalIPv4(invitation.endpoint.host))
-    throw new Error("Invitation requires a literal private LAN IPv4 address");
   bytes(invitation.token, 32);
   const maxClockSkew = 15 * 60_000;
   if (invitation.expires < now - maxClockSkew)
-    throw new Error("Invitation expired. Create a new one.");
+    throw new Error("This code has expired. Ask your friend for a new code.");
   if (invitation.expires > now + 11 * 60_000 + maxClockSkew)
     throw new Error(
-      "Device clocks differ significantly. Adjust system clocks or create a new invitation.",
+      "Device clocks differ significantly. Adjust system clocks and try again.",
     );
   if (
     !sodium.crypto_sign_verify_detached(
@@ -588,7 +589,9 @@ export function parseInvitation(code: string, now = Date.now()): Invitation {
       bytes(invitation.identity.signKey, 32),
     )
   )
-    throw new Error("Invitation signature changed");
+    throw new Error(
+      "The pairing data was changed. Ask your friend for a new code.",
+    );
   return invitation;
 }
 export function tokenMatches(a: string, b: string): boolean {

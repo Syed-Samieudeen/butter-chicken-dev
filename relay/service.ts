@@ -13,7 +13,10 @@ import {
   checkIdentity,
   checkEnvelope,
   verifySigned,
+  invitationOwner,
+  PAIR_CODE_TTL_MS,
 } from "../shared/relay.js";
+import { randomInt } from "node:crypto";
 import { parseStrictJson } from "../shared/json.js";
 import { MAX_FRAME_BYTES, type PublicIdentity } from "../shared/protocol.js";
 export const RETENTION_MS = 24 * 60 * 60 * 1000;
@@ -51,11 +54,23 @@ export async function createRelay(options: RelayOptions) {
   if (options.dataFile !== ":memory:") chmodSync(options.dataFile, 0o600);
   db.exec(`PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;
  CREATE TABLE IF NOT EXISTS pins(owner TEXT PRIMARY KEY,peer TEXT NOT NULL,pair TEXT NOT NULL,json TEXT NOT NULL);
- CREATE TABLE IF NOT EXISTS mail(sender TEXT,recipient TEXT,id TEXT,pair TEXT,json TEXT,expires INTEGER,PRIMARY KEY(sender,id));`);
+ CREATE TABLE IF NOT EXISTS mail(sender TEXT,recipient TEXT,id TEXT,pair TEXT,json TEXT,expires INTEGER,PRIMARY KEY(sender,id));
+ CREATE TABLE IF NOT EXISTS offers(code TEXT PRIMARY KEY,owner TEXT NOT NULL,invitation TEXT NOT NULL,expires INTEGER NOT NULL);`);
   const retention = Math.min(options.retentionMs ?? RETENTION_MS, RETENTION_MS);
-  const cleanup = () =>
+  const cleanup = () => {
     db.prepare("DELETE FROM mail WHERE expires<=?").run(Date.now());
+    db.prepare("DELETE FROM offers WHERE expires<=?").run(Date.now());
+  };
   cleanup();
+  // Failed 6-digit guesses across all connections. Identities are free to create, so the limit is global.
+  const failedJoins: number[] = [];
+  const newCode = () => {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const code = String(randomInt(0, 1_000_000)).padStart(6, "0");
+      if (!db.prepare("SELECT 1 FROM offers WHERE code=?").get(code)) return code;
+    }
+    throw Error("Pairing capacity");
+  };
   const sessions = new Map<string, Client>();
   const all = new Set<Client>();
   const links = new Map<string, { a: Client; b: Client }>();
@@ -344,6 +359,43 @@ export async function createRelay(options: RelayOptions) {
             "DELETE FROM mail WHERE sender=? AND recipient=? AND id=?",
           ).run(v.senderId, own.id, v.messageId);
         } else if (v.type === "poll") deliver(c);
+        else if (v.type === "pair-create") {
+          if (invitationOwner(v.invitation) !== own.id)
+            throw Error("Invitation belongs to another identity");
+          cleanup();
+          db.prepare("DELETE FROM offers WHERE owner=?").run(own.id);
+          const code = newCode();
+          const expires = Date.now() + PAIR_CODE_TTL_MS;
+          db.prepare("INSERT INTO offers VALUES (?,?,?,?)").run(
+            code,
+            own.id,
+            v.invitation,
+            expires,
+          );
+          send(c, { type: "pair-code", code, expires });
+        } else if (v.type === "pair-cancel") {
+          db.prepare("DELETE FROM offers WHERE owner=?").run(own.id);
+          send(c, { type: "pair-cancelled" });
+        } else if (v.type === "pair-join") {
+          cleanup();
+          const recent = failedJoins.filter((t) => Date.now() - t < 60_000);
+          failedJoins.splice(0, failedJoins.length, ...recent);
+          if (recent.length >= 50) {
+            send(c, { type: "error", code: "PAIR_RATE_LIMITED" });
+            return;
+          }
+          const row = db
+            .prepare("SELECT owner,invitation FROM offers WHERE code=?")
+            .get(v.code);
+          if (!row || row.owner === own.id) {
+            failedJoins.push(Date.now());
+            send(c, { type: "error", code: "PAIR_NOT_FOUND" });
+            return;
+          }
+          // A code is single use: remove it before replying.
+          db.prepare("DELETE FROM offers WHERE code=?").run(v.code);
+          send(c, { type: "pair-offer", invitation: String(row.invitation) });
+        }
       } catch {
         log("rejected");
         ws.close(1008, "Invalid or unauthorized relay command");

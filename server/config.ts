@@ -1,9 +1,10 @@
-import { RelayUrl } from "../shared/relay.js";
+import { DEFAULT_RELAY_URL, RelayUrl } from "../shared/relay.js";
 import { homedir } from "node:os";
 import { isAbsolute, join, resolve } from "node:path";
 import { existsSync, readFileSync } from "node:fs";
 import { parseEnv } from "node:util";
-import { chooseBind } from "./discovery.js";
+
+export const CLOUDFLARE_RELAY_HOST = "butterchickenworker.bakri-downtime-sub.workers.dev";
 
 export function defaultDataDirectory(
   platform = process.platform,
@@ -30,6 +31,16 @@ const port = (value: string | undefined, fallback: number) => {
     throw new Error("Invalid port configuration");
   return number;
 };
+export function relayFromEnv(env: NodeJS.ProcessEnv): string | undefined {
+  if (env.BC_RELAY_URL) return env.BC_RELAY_URL.trim();
+  const shortcut = env.BC_CLOUDFLARE_RELAY?.trim();
+  if (!shortcut) return undefined;
+  if (["1", "true", "cloudflare"].includes(shortcut.toLowerCase()))
+    return DEFAULT_RELAY_URL;
+  if (/^wss?:\/\//i.test(shortcut)) return shortcut;
+  const host = shortcut.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+  return `wss://${host}${host.endsWith("/relay") ? "" : "/relay"}`;
+}
 export function loadConfiguration(
   projectRoot: string,
   development = false,
@@ -49,9 +60,6 @@ export function loadConfiguration(
     const values = parseEnv(readFileSync(configFile, "utf8"));
     for (const key of [
       "BC_UI_PORT",
-      "BC_LAN_PORT",
-      "BC_LAN_HOST",
-      "BC_DISCOVERY",
       "BC_DATA_DIR",
       "BC_RELAY_URL",
       "BC_CLOUDFLARE_RELAY",
@@ -62,32 +70,13 @@ export function loadConfiguration(
   const dataDirectory = env.BC_DATA_DIR || initialData;
   if (!isAbsolute(dataDirectory))
     throw new Error("BC_DATA_DIR must be an absolute private directory");
-  if (env.BC_DISCOVERY && !["true", "false"].includes(env.BC_DISCOVERY))
-    throw new Error("BC_DISCOVERY must be true or false");
-  const lanHost = env.BC_LAN_HOST || "auto";
-  chooseBind(lanHost); // Reject invalid/public host configuration before starting listeners.
-  let relaySource = env.BC_RELAY_URL;
-  if (!relaySource && env.BC_CLOUDFLARE_RELAY) {
-    const value = env.BC_CLOUDFLARE_RELAY.trim();
-    if (value === "1" || value.toLowerCase() === "true") {
-      relaySource =
-        "wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay";
-    } else if (/^wss?:\/\//i.test(value)) {
-      relaySource = value;
-    } else {
-      const host = value.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
-      relaySource = `wss://${host}${host.endsWith("/relay") ? "" : "/relay"}`;
-    }
-  }
-  const relayUrl = relaySource ? RelayUrl.parse(relaySource) : undefined;
-  if (relayUrl?.startsWith("ws:") && !development)
+  const relayText = relayFromEnv(env) ?? DEFAULT_RELAY_URL;
+  const relayUrl = RelayUrl.parse(relayText);
+  if (relayUrl.startsWith("ws:") && !development)
     throw new Error("Production relay requires WSS");
   return {
     relayUrl,
     uiPort: port(env.BC_UI_PORT, 3000),
-    lanPort: port(env.BC_LAN_PORT, 4455),
-    lanHost,
-    discovery: env.BC_DISCOVERY !== "false",
     dataDirectory: resolve(dataDirectory),
     dataFile: join(dataDirectory, "butter-chicken.sqlite"),
     configFile,

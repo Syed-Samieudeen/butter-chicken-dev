@@ -14,14 +14,6 @@ export const IdentitySchema = z
   .object({ id: Id, boxKey: b64(43), signKey: b64(43) })
   .strict();
 export type PublicIdentity = z.infer<typeof IdentitySchema>;
-export const EndpointSchema = z
-  .object({
-    host: z.string().min(1).max(253),
-    port: z.number().int().min(1).max(65535),
-    nodeId: MessageId,
-  })
-  .strict();
-export type Endpoint = z.infer<typeof EndpointSchema>;
 export const HelloSchema = z
   .object({
     version: z.literal(1),
@@ -97,47 +89,20 @@ export const ArchiveSchema = z
   })
   .strict();
 export type Archive = z.infer<typeof ArchiveSchema>;
+
+/** Commands the browser may ask the local Node bridge to forward to the relay. */
 export const LocalCommandSchema = z.discriminatedUnion("type", [
-  z
-    .object({
-      type: z.literal("connect"),
-      host: z.string().min(1).max(253),
-      port: z.number().int().min(1).max(65535),
-      requestId: MessageId,
-    })
-    .strict(),
-  z
-    .object({
-      type: z.literal("send"),
-      connectionId: z.string().uuid(),
-      frame: FrameSchema,
-    })
-    .strict(),
-  z
-    .object({ type: z.literal("disconnect"), connectionId: z.string().uuid() })
-    .strict(),
-  z.object({ type: z.literal("disconnect-all") }).strict(),
   z.object({ type: z.literal("relay-open") }).strict(),
   z.object({ type: z.literal("relay-send"), packet: z.unknown() }).strict(),
+  z.object({ type: z.literal("disconnect-all") }).strict(),
 ]);
-export type DiscoveryDevice = Endpoint & { label: string };
+
 export type ServerEvent =
   | { type: "relay"; packet: unknown }
   | { type: "relay-close" }
-  | { type: "network"; endpoint: Endpoint; devices: DiscoveryDevice[] }
-  | {
-      type: "peer-open";
-      connectionId: string;
-      outbound: boolean;
-      requestId?: string;
-      address: string;
-      port: number;
-    }
-  | { type: "peer-close"; connectionId: string }
-  | { type: "frame"; connectionId: string; frame: Frame }
-  | { type: "error"; code: string; requestId?: string };
+  | { type: "error"; code: string };
+
 export type ConnectionState =
-  | "DISCOVERING"
   | "CONNECTING"
   | "AUTHENTICATING"
   | "CONNECTED"

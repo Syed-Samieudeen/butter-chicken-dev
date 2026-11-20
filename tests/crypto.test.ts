@@ -73,13 +73,9 @@ test("public-key boxes encrypt, authenticate, bind recipient and sign every oute
 test("expired, malformed and modified invitations fail; security code binds both key pairs", () => {
   const a = createIdentity("Alex");
   const b = createIdentity("Sam");
-  const { code } = makeInvitation(a, {
-    nodeId: "ab".repeat(16),
-    host: "192.168.1.2",
-    port: 4455,
-  });
-  assert.equal(parseInvitation(code).identity.id, a.public.id);
-  assert.throws(() => parseInvitation(code, Date.now() + 11 * 60_000));
+  const { text } = makeInvitation(a, "wss://relay.example.com/relay");
+  assert.equal(parseInvitation(text).identity.id, a.public.id);
+  assert.throws(() => parseInvitation(text, Date.now() + 26 * 60_000));
   assert.throws(() => parseInvitation("123-456"));
   assert.notEqual(
     securityCode(a.public, b.public),

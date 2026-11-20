@@ -1,7 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { Store } from "../server/store.js";
-import { isLocalIPv4 } from "../server/discovery.js";
 import { mkdtemp, readFile, rm, mkdir, chmod, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -47,31 +46,6 @@ test("outgoing delivery survives queries; plaintext cannot enter database API", 
     s.putOutgoing({ ...row, direction: "outgoing", text: "plaintext" }),
   );
   s.close();
-});
-test("LAN destination policy blocks public endpoints and ambiguous host names", () => {
-  for (const ip of [
-    "192.168.1.2",
-    "10.0.0.2",
-    "172.31.1.3",
-    "127.0.0.1",
-    "100.64.0.1",
-    "100.80.149.116",
-    "100.127.255.254",
-  ])
-    assert.equal(isLocalIPv4(ip), true);
-  for (const ip of [
-    "8.8.8.8",
-    "172.32.1.1",
-    "example.com",
-    "192.168.1.2.evil.test",
-    "::1",
-    "0.0.0.0",
-    "100.0.0.1",
-    "100.63.255.255",
-    "100.128.0.1",
-    "100.200.0.1",
-  ])
-    assert.equal(isLocalIPv4(ip), false);
 });
 test("real encrypted vault, history and replay ledger survive closing and reopening SQLite", async () => {
   await cryptoReady;

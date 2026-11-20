@@ -9,6 +9,12 @@ import {
   type PublicIdentity,
   type Envelope,
 } from "./protocol.js";
+
+/** Public relay address used when no BC_RELAY_URL or BC_CLOUDFLARE_RELAY is configured. It is not a secret. */
+export const DEFAULT_RELAY_URL =
+  "wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay";
+export const PAIR_CODE_TTL_MS = 10 * 60_000;
+
 export const RelayUrl = z
   .string()
   .max(2048)
@@ -74,7 +80,40 @@ export const RelayCommand = z.discriminatedUnion("type", [
     .object({ type: z.literal("consume"), senderId: Id, messageId: MessageId })
     .strict(),
   z.object({ type: z.literal("poll") }).strict(),
+  z
+    .object({
+      type: z.literal("pair-create"),
+      invitation: z.string().min(40).max(3000),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("pair-join"),
+      code: z.string().regex(/^\d{6}$/),
+    })
+    .strict(),
+  z.object({ type: z.literal("pair-cancel") }).strict(),
 ]);
+
+/** Identity id named inside a BC1 invitation, without verifying its signature. Relays use this only to bind codes to their owner. */
+export function invitationOwner(text: string): string | undefined {
+  try {
+    if (!text.startsWith("BC1.")) return undefined;
+    const value = JSON.parse(
+      sodium.to_string(
+        sodium.from_base64(
+          text.slice(4),
+          sodium.base64_variants.URLSAFE_NO_PADDING,
+        ),
+      ),
+    );
+    const id = value?.identity?.id;
+    return typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 export function authInput(
   challenge: string,
   identity: PublicIdentity,

@@ -88,7 +88,7 @@ const labels: Record<string, string> = {
   "/settings": "Settings",
   "/help": "Help",
   "/help/faq": "FAQs",
-  "/help/two-computers": "Two-computer setup",
+  "/help/two-computers": "Pairing guide",
   "/help/use-cases": "Example use cases",
   "/help/security": "Encryption and limits",
   "/help/demo": "Product demo",
@@ -124,24 +124,24 @@ export function Breadcrumbs({
 }
 const faqs = [
   [
-    "Do we need the internet?",
-    "For different Wi-Fi or mobile networks, configure the same WSS relay on both computers. Messages are encrypted locally and queued when offline. A reachable LAN can use a direct connection without internet. Both users keep their local app running and unlock to receive.",
+    "Do I need my friend's network?",
+    "No. Both computers connect outbound to the Butter Chicken relay, so you can be on different Wi-Fi, mobile data or other countries. You never share IP addresses.",
   ],
   [
-    "How do I know I paired with the right person?",
-    "Share the one-time invitation privately. Compare all eight groups of the security code in person or on a call you already trust. Both people must confirm the match. A display name or a nearby-device listing alone does not prove identity.",
+    "How do I pair with my friend?",
+    "One person chooses Create a code and shares the 6-digit code privately. The other enters it and connects. Then you both compare the short security code on a call or in person. Only confirm when both screens match.",
   ],
   [
-    "What happens when our Wi-Fi or IP address changes?",
-    "Trust is attached to public keys rather than an IP address. Internet relay connections retry automatically with exponential backoff when networks change. Local discovery supplies direct LAN hints. Keep the original identity and vault.",
+    "What happens when I go away?",
+    "After 10 minutes without activity the screen locks and asks for your passphrase. Your connection stays on, so messages keep arriving. Keep this tab open to stay connected.",
   ],
   [
     "Are messages and private keys stored safely?",
-    "Message contents and private keys are encrypted locally. A passphrase protects the vault, and each conversation record is encrypted with a separate archive key. Use a strong passphrase and disk encryption. An unlocked computer, malware or a malicious administrator can still expose messages.",
+    "Messages and keys are encrypted on your computer. A passphrase protects the vault, and each conversation record is encrypted with its own key. Use a strong passphrase and disk encryption.",
   ],
   [
-    "What does resetting or removing a device do?",
-    "Removing trust deletes this device’s pairing and local history while keeping its own identity. Resetting the identity also deletes the local vault and keys. The other person’s history remains. Both people must remove the old pairing and verify a new invitation. There is no account-based recovery.",
+    "What does resetting or removing a friend do?",
+    "Removing a friend deletes this device's conversation and trust. Resetting the identity also deletes your keys. Your friend's copy is unchanged, and both of you must pair again.",
   ],
 ] as const;
 function FAQs() {
@@ -259,7 +259,7 @@ export function InfoPage({
           <h3>Captured from a working conversation</h3>
           <p>
             This screenshot comes from the automated browser test: two separate
-            local services created identities, scanned an invitation, verified
+            local services created identities, entered a 6-digit code, verified
             the code and exchanged encrypted messages.
           </p>
           <img
@@ -290,13 +290,13 @@ export function InfoPage({
           <p>
             {friendName
               ? "Your friend will be authenticated against these saved keys on each connection. You can compare the same shared code again in Security."
-              : "Open the app on both computers, create an invitation and compare every group of the security code. Then each person confirms the match."}
+              : "Open the app on both computers, create a 6-digit code, enter it on the other computer, and compare the security code. Then each person confirms the match."}
           </p>
           <div className="small-note">
             <Check size={16} />
             {friendName
               ? "Both devices confirmed the pairing code."
-              : "Discovery and names alone do not establish trust."}
+              : "A code and names alone do not establish trust."}
           </div>
           <InternalLink href="/help/security" navigate={navigate}>
             Read about encryption and its limits <ArrowRight size={14} />
@@ -316,66 +316,31 @@ export function InfoPage({
               <div className="card-icon">
                 <Laptop size={26} />
               </div>
-              <h3>Computer A · invite</h3>
+              <h3>Person A · create a code</h3>
               <ol>
-                <li>
-                  Install Node.js 24, extract the project and open a terminal in
-                  its folder.
-                </li>
-                <li>
-                  Install the included bundle with{" "}
-                  <code>npm install --global ./butter-chicken-1.0.0.tgz</code>,
-                  then run <code>butter-chicken</code>. Both the UI and LAN
-                  service start together.
-                </li>
-                <li>
-                  Open <code>http://localhost:3000</code> on Computer A and
-                  create an identity with a strong passphrase.
-                </li>
-                <li>
-                  Choose <strong>Create invitation</strong>. Share the complete
-                  invitation or QR privately with your friend.
-                </li>
+                <li>Install Butter Chicken and run <code>butter-chicken</code>.</li>
+                <li>Open <code>http://localhost:3000</code> and create your identity.</li>
+                <li>Choose <strong>Pair</strong>, then <strong>Create a code</strong>.</li>
+                <li>Share the 6-digit code privately. It expires in 10 minutes.</li>
               </ol>
             </article>
             <article className="card">
               <div className="card-icon">
                 <Wifi size={26} />
               </div>
-              <h3>Computer B · connect</h3>
+              <h3>Person B · enter the code</h3>
               <ol>
-                <li>
-                  Install and start the same project on Computer B, using the
-                  same commands.
-                </li>
-                <li>
-                  Open Computer B’s own <code>http://localhost:3000</code> and
-                  create its separate identity.
-                </li>
-                <li>
-                  Paste A’s invitation or use <strong>Scan QR</strong> /{" "}
-                  <strong>Use QR image</strong>, then connect.
-                </li>
-                <li>
-                  Compare all eight groups of the code on both screens. Each
-                  person checks the box and chooses{" "}
-                  <strong>I verified the code</strong>.
-                </li>
+                <li>Install and run Butter Chicken on your own computer.</li>
+                <li>Open <code>http://localhost:3000</code> and create your identity.</li>
+                <li>Choose <strong>Pair</strong>, enter the 6 digits, then <strong>Connect</strong>.</li>
+                <li>Both of you compare every group of the security code and confirm.</li>
               </ol>
             </article>
           </div>
           <div className="card guide-note">
-            <h3>Localhost means the computer you’re using.</h3>
+            <h3>Keep the app open to stay connected.</h3>
             <p>
-              Each browser talks to its own local service. The services connect
-              using a direct LAN connection or the same configured WSS internet
-              relay. Keep both apps running and unlocked on the same reachable
-              network.
-            </p>
-            <p>
-              Allow the LAN port through your firewall on your trusted local
-              network. The included <code>TROUBLESHOOTING.md</code> contains
-              Windows, macOS and Linux instructions.
+              Your connection runs through the relay, so friends on different networks can chat. Keep the browser tab and the terminal open. After 10 minutes without activity the screen asks for your passphrase, but the connection stays on.
             </p>
             <InternalLink href="/help/faq" navigate={navigate}>
               Connection or reset questions? <ArrowRight size={14} />
@@ -385,47 +350,31 @@ export function InfoPage({
       ) : path === "/help/use-cases" ? (
         <>
           <p className="example-label">
-            Illustrative examples, not customer testimonials or measured case
-            studies.
+            Illustrative examples, not customer testimonials or measured case studies.
           </p>
           <div className="guide-grid">
             <article className="card">
               <div className="card-icon">
                 <Heart size={26} />
               </div>
-              <h3>A shared home network</h3>
+              <h3>Friends in different cities</h3>
               <p>
-                Alex and Sam each run the app on their own laptop. They verify
-                the code face to face. Later, when both apps are unlocked on the
-                home Wi-Fi, the saved keys authenticate the connection.
-              </p>
-              <p>
-                If the router assigns a new address, they use discovery or
-                update the LAN address. The trust stays with the same device
-                identity.
+                Alex and Sam each run the app at home. They pair once with a 6-digit code and a security-code check. After that, messages reach each other from any network.
               </p>
             </article>
             <article className="card">
               <div className="card-icon">
                 <MessageCircle size={26} />
               </div>
-              <h3>A local connection without internet</h3>
+              <h3>Messages while someone is away</h3>
               <p>
-                Two people install the app before travelling. On a shared
-                private LAN that permits device-to-device traffic, they can
-                connect even while the internet connection is unavailable.
-              </p>
-              <p>
-                Guest-network isolation may prevent this. The app needs a
-                reachable local network for direct chat. A configured WSS relay
-                also supports different networks and temporary encrypted offline
-                delivery.
+                If one of them is offline, messages wait encrypted on the sender's computer and are delivered when the other person reconnects.
               </p>
             </article>
           </div>
           <div className="guide-note">
             <InternalLink href="/help/two-computers" navigate={navigate}>
-              Try it on your two computers <ArrowRight size={14} />
+              Try it with your friend <ArrowRight size={14} />
             </InternalLink>
           </div>
         </>
@@ -447,7 +396,7 @@ export function InfoPage({
           </p>
           <h3>Your verification establishes trust</h3>
           <p>
-            A one-time invitation expires after ten minutes. Both people compare
+            A 6-digit code expires after ten minutes and works once. Both people compare
             a shared code before trust is saved. Later connections prove
             possession of the pinned keys; an unexpected identity change
             produces a warning.
@@ -477,8 +426,8 @@ export function InfoPage({
               navigate={navigate}
             >
               <Laptop size={25} />
-              <h3>Set up two computers</h3>
-              <p>Install, invite and compare the code.</p>
+              <h3>Pair with a code</h3>
+              <p>Create a code, enter it, and compare the security code.</p>
               <span>
                 Read the guide <ArrowRight size={14} />
               </span>
@@ -486,7 +435,7 @@ export function InfoPage({
             <InternalLink className="card" href="/help/faq" navigate={navigate}>
               <HelpCircle size={25} />
               <h3>Five common questions</h3>
-              <p>Offline chat, Wi-Fi changes and resets.</p>
+              <p>Offline messages, the 10-minute lock and resets.</p>
               <span>
                 Find your answer <ArrowRight size={14} />
               </span>
@@ -510,7 +459,7 @@ export function InfoPage({
             >
               <Heart size={25} />
               <h3>Example use cases</h3>
-              <p>How a conversation fits a shared LAN.</p>
+              <p>How a conversation fits everyday life.</p>
               <span>
                 Explore the examples <ArrowRight size={14} />
               </span>

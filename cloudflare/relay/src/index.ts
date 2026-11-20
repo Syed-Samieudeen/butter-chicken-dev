@@ -1,10 +1,15 @@
-import sodium from "libsodium-wrappers-sumo";
 import { z } from "zod";
+import { ed25519 } from "@noble/curves/ed25519";
+import { blake2b } from "@noble/hashes/blake2b";
 
-let sodiumReady: Promise<void> | undefined;
-const cryptoReady = () => (sodiumReady ??= sodium.ready);
+// Workers cannot compile libsodium's embedded WebAssembly, so the relay uses pure-JavaScript Ed25519 and BLAKE2b.
+// Outputs match libsodium byte for byte, so clients and the Node relay verify the same signatures and identities.
+const cryptoReady = async () => {};
+const enc = new TextEncoder();
+const dec = new TextDecoder();
 
 const MAX_FRAME_BYTES = 65_536;
+const PAIR_CODE_TTL_MS = 10 * 60_000;
 const RETENTION_MS = 24 * 60 * 60 * 1000;
 const MAX_CONNECTIONS = 64;
 const MAX_TOTAL_PINS = 10_000;
@@ -84,7 +89,32 @@ const RelayCommand = z.discriminatedUnion("type", [
     .object({ type: z.literal("consume"), senderId: Id, messageId: MessageId })
     .strict(),
   z.object({ type: z.literal("poll") }).strict(),
+  z
+    .object({
+      type: z.literal("pair-create"),
+      invitation: z.string().min(40).max(3000),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("pair-join"),
+      code: z.string().regex(/^\d{6}$/),
+    })
+    .strict(),
+  z.object({ type: z.literal("pair-cancel") }).strict(),
 ]);
+
+/** Identity id named inside a BC1 invitation, without verifying its signature. Codes are bound to their owner. */
+function invitationOwner(text: string): string | undefined {
+  try {
+    if (!text.startsWith("BC1.")) return undefined;
+    const value = JSON.parse(dec.decode(un64(text.slice(4))));
+    const id = value?.identity?.id;
+    return typeof id === "string" ? id : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 /** Reject duplicate members and ambiguous value encodings; permit insignificant JSON whitespace. */
 function parseStrictJson(raw: string): unknown {
@@ -97,13 +127,22 @@ function parseStrictJson(raw: string): unknown {
   return value;
 }
 
-function b64(bytes: Uint8Array) {
-  return sodium.to_base64(bytes, sodium.base64_variants.URLSAFE_NO_PADDING);
+function b64(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
-function un64(value: string) {
-  const b = sodium.from_base64(value, sodium.base64_variants.URLSAFE_NO_PADDING);
-  if (b64(b) !== value) throw Error("Noncanonical encoding");
-  return b;
+function un64(value: string): Uint8Array {
+  if (!/^[A-Za-z0-9_-]*$/.test(value)) throw Error("Noncanonical encoding");
+  const padded =
+    value.replace(/-/g, "+").replace(/_/g, "/") +
+    "=".repeat((4 - (value.length % 4)) % 4);
+  const bytes = Uint8Array.from(atob(padded), (c) => c.charCodeAt(0));
+  if (b64(bytes) !== value) throw Error("Noncanonical encoding");
+  return bytes;
+}
+function hex(bytes: Uint8Array): string {
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
 }
 function authInput(challenge: string, identity: PublicIdentity, audience: string) {
   return [
@@ -126,21 +165,21 @@ function pinInput(identity: PublicIdentity, peer: PublicIdentity, pairId: string
   ];
 }
 function verifySigned(value: unknown, signature: string, identity: PublicIdentity) {
-  return sodium.crypto_sign_verify_detached(
+  return ed25519.verify(
     un64(signature),
-    sodium.from_string(JSON.stringify(value)),
+    enc.encode(JSON.stringify(value)),
     un64(identity.signKey),
+    { zip215: false },
   );
 }
 function checkIdentity(identity: PublicIdentity) {
   IdentitySchema.parse(identity);
-  const id = sodium.to_hex(
-    sodium.crypto_generichash(
-      32,
-      sodium.from_string(
+  const id = hex(
+    blake2b(
+      enc.encode(
         JSON.stringify(["ButterChicken/identity/v1", identity.boxKey, identity.signKey]),
       ),
-      null,
+      { dkLen: 32 },
     ),
   );
   if (id !== identity.id || un64(identity.boxKey).length !== 32 || un64(identity.signKey).length !== 32)
@@ -203,6 +242,21 @@ export class RelayDurableObject {
   private all = new Set<Client>();
   private links = new Map<string, { a: Client; b: Client }>();
   private initialized = false;
+  // Failed 6-digit guesses across all connections. Identities are free to create, so the limit is global.
+  private failedJoins: number[] = [];
+  private newCode(): string {
+    for (let attempt = 0; attempt < 50; attempt++) {
+      const value = new Uint32Array(1);
+      crypto.getRandomValues(value);
+      if (value[0] >= 4_294_000_000) continue;
+      const code = String(value[0] % 1_000_000).padStart(6, "0");
+      const taken = [
+        ...this.state.storage.sql.exec("SELECT 1 FROM offers WHERE code=?", code),
+      ];
+      if (!taken.length) return code;
+    }
+    throw Error("Pairing capacity");
+  }
   private maintenance?: ReturnType<typeof setInterval>;
 
   constructor(private state: DurableObjectState, private env: Env) {}
@@ -210,12 +264,14 @@ export class RelayDurableObject {
   private init() {
     if (this.initialized) return;
     this.state.storage.sql.exec(`CREATE TABLE IF NOT EXISTS pins(owner TEXT PRIMARY KEY,peer TEXT NOT NULL,pair TEXT NOT NULL,json TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS offers(code TEXT PRIMARY KEY,owner TEXT NOT NULL,invitation TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS mail(sender TEXT,recipient TEXT,id TEXT,pair TEXT,json TEXT,expires INTEGER,PRIMARY KEY(sender,id));`);
     this.initialized = true;
   }
 
   private cleanup() {
     this.state.storage.sql.exec("DELETE FROM mail WHERE expires<=?", Date.now());
+    this.state.storage.sql.exec("DELETE FROM offers WHERE expires<=?", Date.now());
   }
 
   private pinned(id: string): { peer: string; pair: string; json: string } | undefined {
@@ -496,6 +552,46 @@ CREATE TABLE IF NOT EXISTS mail(sender TEXT,recipient TEXT,id TEXT,pair TEXT,jso
           );
         } else if (v.type === "poll") {
           this.deliver(c);
+        } else if (v.type === "pair-create") {
+          if (invitationOwner(v.invitation) !== own.id)
+            throw Error("Invitation belongs to another identity");
+          this.cleanup();
+          this.state.storage.sql.exec("DELETE FROM offers WHERE owner=?", own.id);
+          const code = this.newCode();
+          const expires = Date.now() + PAIR_CODE_TTL_MS;
+          this.state.storage.sql.exec(
+            "INSERT INTO offers VALUES (?,?,?,?)",
+            code,
+            own.id,
+            v.invitation,
+            expires,
+          );
+          send(c, { type: "pair-code", code, expires });
+        } else if (v.type === "pair-cancel") {
+          this.state.storage.sql.exec("DELETE FROM offers WHERE owner=?", own.id);
+          send(c, { type: "pair-cancelled" });
+        } else if (v.type === "pair-join") {
+          this.cleanup();
+          const now = Date.now();
+          this.failedJoins = this.failedJoins.filter((t) => now - t < 60_000);
+          if (this.failedJoins.length >= 50) {
+            send(c, { type: "error", code: "PAIR_RATE_LIMITED" });
+            return;
+          }
+          const row = [
+            ...this.state.storage.sql.exec(
+              "SELECT owner,invitation FROM offers WHERE code=?",
+              v.code,
+            ),
+          ][0] as { owner: string; invitation: string } | undefined;
+          if (!row || row.owner === own.id) {
+            this.failedJoins.push(now);
+            send(c, { type: "error", code: "PAIR_NOT_FOUND" });
+            return;
+          }
+          // A code is single use: remove it before replying.
+          this.state.storage.sql.exec("DELETE FROM offers WHERE code=?", v.code);
+          send(c, { type: "pair-offer", invitation: String(row.invitation) });
         }
       } catch {
         log("rejected");

@@ -53,17 +53,14 @@ test("configuration is bounded to known fields, keeps environment precedence and
   try {
     await writeFile(
       join(folder, "config.env"),
-      "BC_UI_PORT=3100\nBC_LAN_PORT=4555\nBC_DISCOVERY=false\nBC_RELAY_URL=wss://relay.example.com/relay\nUNRELATED=ignored\n",
+      "BC_UI_PORT=3100\nBC_RELAY_URL=wss://relay.example.com/relay\nUNRELATED=ignored\n",
       { mode: 0o600 },
     );
     const config = loadConfiguration(resolve("."), false, {
       BC_DATA_DIR: folder,
       BC_UI_PORT: "3200",
-      BC_LAN_HOST: "127.0.0.1",
     });
     assert.equal(config.uiPort, 3200);
-    assert.equal(config.lanPort, 4555);
-    assert.equal(config.discovery, false);
     assert.equal(config.relayUrl, "wss://relay.example.com/relay");
     assert.equal(config.dataFile, join(folder, "butter-chicken.sqlite"));
     assert.equal(process.env.UNRELATED, undefined);
@@ -71,7 +68,6 @@ test("configuration is bounded to known fields, keeps environment precedence and
     assert.equal(
       loadConfiguration(folder, false, {
         BC_DATA_DIR: join(folder, "other"),
-        BC_LAN_HOST: "127.0.0.1",
       }).uiPort,
       3000,
       "Global configuration read an unrelated project .env",
@@ -79,18 +75,27 @@ test("configuration is bounded to known fields, keeps environment precedence and
     assert.equal(
       loadConfiguration(folder, true, {
         BC_DATA_DIR: join(folder, "other"),
-        BC_LAN_HOST: "127.0.0.1",
       }).uiPort,
       3999,
+    );
+    assert.equal(
+      loadConfiguration(folder, false, { BC_DATA_DIR: join(folder, "other") })
+        .relayUrl,
+      "wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay",
+      "The Cloudflare relay is the default",
+    );
+    assert.equal(
+      loadConfiguration(folder, false, {
+        BC_DATA_DIR: join(folder, "other"),
+        BC_CLOUDFLARE_RELAY: "1",
+      }).relayUrl,
+      "wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay",
     );
 
     for (const extra of [
       { BC_UI_PORT: "0" },
-      { BC_LAN_PORT: "65536" },
       { BC_DATA_DIR: "relative" },
       { BC_CONFIG_FILE: "relative.env" },
-      { BC_LAN_HOST: "8.8.8.8" },
-      { BC_DISCOVERY: "maybe" },
       { BC_RELAY_URL: "ws://127.0.0.1:8787/relay" },
       { BC_RELAY_URL: "ws://public.example.com/relay" },
       { BC_RELAY_URL: "wss://user:secret@relay.example.com/relay" },
@@ -134,20 +139,17 @@ test("CLI help/version work from another directory; unknown commands fail safely
 });
 
 test(
-  "production CLI launches UI/LAN from any directory and status is metadata-only",
+  "production CLI launches the UI from any directory and status is metadata-only",
   { timeout: 10000 },
   async () => {
     const folder = await mkdtemp(join(tmpdir(), "bc-cli-"));
     const cli = resolve("bin/butter-chicken.mjs");
-    const uiPort = await free(),
-      lanPort = await free();
+    const uiPort = await free();
     const env = {
       ...process.env,
       BC_DATA_DIR: join(folder, "data"),
       BC_UI_PORT: String(uiPort),
-      BC_LAN_PORT: String(lanPort),
-      BC_LAN_HOST: "127.0.0.1",
-      BC_DISCOVERY: "false",
+      BC_RELAY_URL: "wss://relay.example.com/relay",
       BC_CONFIG_FILE: join(folder, "missing.env"),
     };
     const child = spawn(process.execPath, [cli], {
@@ -170,8 +172,8 @@ test(
       const info = (await response.json()) as Record<string, unknown>;
       assert.deepEqual(Object.keys(info).sort(), [
         "application",
-        "endpoint",
         "hasVault",
+        "relayUrl",
         "uiPort",
       ]);
       assert.equal(info.hasVault, false);
@@ -183,10 +185,6 @@ test(
           })
         ).status,
         403,
-      );
-      assert.equal(
-        (await fetch(`http://127.0.0.1:${lanPort}/api/status`)).status,
-        404,
       );
       const status = await new Promise<{ code: number | null; output: string }>(
         (resolve) => {

@@ -82,15 +82,12 @@ const free = async () => {
   await new Promise<void>((r) => server.close(() => r()));
   return port;
 };
-const uiPort = await free(),
-  lanPort = await free();
+const uiPort = await free();
 const env = {
   ...process.env,
   BC_DATA_DIR: data,
   BC_UI_PORT: String(uiPort),
-  BC_LAN_PORT: String(lanPort),
-  BC_LAN_HOST: "127.0.0.1",
-  BC_DISCOVERY: "false",
+  BC_RELAY_URL: "ws://127.0.0.1:9/relay",
   BC_CONFIG_FILE: join(data, "config.env"),
 };
 let server: ChildProcess | undefined;
@@ -131,7 +128,7 @@ try {
   const shrinkwrap = JSON.parse(
     await readFile(join(installed, "npm-shrinkwrap.json"), "utf8"),
   );
-  for (const name of ["ws", "bonjour-service", "zod"]) {
+  for (const name of ["ws", "zod"]) {
     const installedVersion = JSON.parse(
       await readFile(
         join(installed, "node_modules", name, "package.json"),
@@ -148,7 +145,6 @@ try {
   );
   await start();
   assert.equal((await fetch(`http://127.0.0.1:${uiPort}/`)).status, 200);
-  assert.equal((await fetch(`http://127.0.0.1:${lanPort}/`)).status, 404);
   assert.match(
     await run(process.execPath, [cli, "status"], { cwd: unrelated, env }),
     /running/,
@@ -162,7 +158,6 @@ try {
   live.friend = {
     public: peer.public,
     displayName: peer.displayName,
-    endpoint: { host: "127.0.0.1", port: lanPort, nodeId: "ab".repeat(16) },
     trustedSince: now,
     verifiedAt: now,
     lastSeen: now,

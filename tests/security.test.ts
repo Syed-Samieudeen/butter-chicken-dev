@@ -24,9 +24,8 @@ const pause = (ms: number) => new Promise((r) => setTimeout(r, ms));
 const options = {
   dataFile: ":memory:",
   uiPort: 0,
-  lanPort: 0,
-  lanHost: "127.0.0.1",
-  discovery: false,
+  relayUrl: "ws://127.0.0.1:9/relay",
+  relayDevelopment: true,
 };
 async function raw(port: number, input: string): Promise<string> {
   return new Promise((resolve) => {
@@ -136,33 +135,16 @@ test("mutation corpus rejects malformed frames, tampering, malicious invitations
   assert.throws(() =>
     parseFrame(JSON.stringify({ ...hello, __protoField: { polluted: true } })),
   );
-  for (const host of [
-    "https://evil.invalid",
-    "8.8.8.8",
-    "127.0.0.1@evil.invalid",
-    "../etc/passwd",
-    "javascript:alert(1)",
-  ]) {
-    const invite = makeInvitation(a, {
-      host,
-      port: 4455,
-      nodeId: "ab".repeat(16),
-    });
-    assert.throws(() => parseInvitation(invite.code));
-  }
-  const { code } = makeInvitation(a, {
-    host: "192.168.1.2",
-    port: 4455,
-    nodeId: "ab".repeat(16),
-  });
+  const relayUrl = "wss://relay.example.com/relay";
+  const { text } = makeInvitation(a, relayUrl);
   const original = JSON.parse(
-    Buffer.from(code.slice(4), "base64url").toString(),
+    Buffer.from(text.slice(4), "base64url").toString(),
   );
   for (const changed of [
-    { ...original, endpoint: { ...original.endpoint, host: "192.168.1.3" } },
     { ...original, identity: b.public },
-    { ...original, url: "https://evil.invalid" },
+    { ...original, relayUrl: "wss://evil.invalid/relay" },
     { ...original, expires: 0 },
+    { ...original, token: "A".repeat(43) },
   ]) {
     assert.throws(() =>
       parseInvitation(
@@ -170,6 +152,8 @@ test("mutation corpus rejects malformed frames, tampering, malicious invitations
       ),
     );
   }
+  for (const bad of ["BC1.", "BC1.!!!", "BC1." + "A".repeat(40), "NOPE"])
+    assert.throws(() => parseInvitation(bad));
   assert.ok(mutations >= 120);
 });
 
@@ -185,7 +169,6 @@ test(
     child.stderr!.on("data", (b) => (diagnostic += b.toString()));
     const ports = (await once(child, "message"))[0] as {
       uiPort: number;
-      lanPort: number;
     };
     try {
       const host = `127.0.0.1:${ports.uiPort}`;
@@ -348,7 +331,7 @@ test("API validation rejects duplicate JSON, oversized input, SQL and prototype 
 });
 
 test(
-  "WebSocket authorization, malformed frames, size, burst, simultaneous-session and peer limits",
+  "WebSocket authorization, malformed local commands and simultaneous-session limits",
   { timeout: 20000 },
   async () => {
     await cryptoReady;
@@ -356,8 +339,7 @@ test(
     const sockets: WebSocket[] = [];
     try {
       const s = await session(app.uiPort);
-      const ui = `ws://127.0.0.1:${app.uiPort}/local`,
-        lan = `ws://127.0.0.1:${app.endpoint.port}/lan`;
+      const ui = `ws://127.0.0.1:${app.uiPort}/local`;
       assert.equal(await rejected(ui), true);
       assert.equal(
         await rejected(ui, {
@@ -371,9 +353,12 @@ test(
         true,
       );
       assert.equal(
-        await rejected(lan),
+        await rejected(`ws://127.0.0.1:${app.uiPort}/lan`, {
+          Cookie: s.cookie,
+          Origin: s.base,
+        }),
         true,
-        "LAN must not remain usable without an unlocked local client",
+        "The removed LAN endpoint must not accept connections",
       );
       const client = await local(app.uiPort, s.cookie);
       sockets.push(client);
@@ -383,63 +368,18 @@ test(
       const secondClosed = once(second, "close");
       await once(second, "open");
       assert.equal((await secondClosed)[0], 4009);
-      assert.equal(await rejected(lan, { Origin: s.base }), true);
-      const valid = makeHello(createIdentity("Synthetic"), randomChallenge());
-      const corpus = [
-        "{",
-        "null",
-        "[]",
-        "{}",
-        '{"kind":"unknown"}',
-        JSON.stringify({ ...valid, version: 2 }),
-        JSON.stringify({ ...valid, challenge: "bad!" }),
-        JSON.stringify({ ...valid, extra: "<script>1</script>" }),
-        JSON.stringify(valid).replace('"version":1', '"version":1,"version":1'),
-      ];
-      for (const payload of corpus) {
-        const peer = new WebSocket(lan);
-        const closed = once(peer, "close");
-        await once(peer, "open");
-        peer.send(payload);
-        assert.equal((await closed)[0], 1008);
-      }
-      const binary = new WebSocket(lan);
-      const binaryClosed = once(binary, "close");
-      await once(binary, "open");
-      binary.send(Buffer.from(JSON.stringify(valid)));
-      assert.equal((await binaryClosed)[0], 1008);
-      const large = new WebSocket(lan);
-      large.on("error", () => {});
-      const largeClosed = once(large, "close");
-      await once(large, "open");
-      large.send("a".repeat(65537));
-      assert.equal((await largeClosed)[0], 1009);
-      const burst = new WebSocket(lan);
-      const burstClosed = once(burst, "close");
-      await once(burst, "open");
-      for (let n = 0; n < 101; n++) burst.send(JSON.stringify(valid));
-      assert.equal((await burstClosed)[0], 1008);
-      await pause(40);
-      for (let n = 0; n < 8; n++) {
-        const peer = new WebSocket(lan);
-        await once(peer, "open");
-        sockets.push(peer);
-      }
-      assert.equal(await rejected(lan), true, "Ninth peer accepted");
-      assert.equal((await fetch(s.base + "/api/bootstrap")).status, 200);
-      // No compression extension is negotiated; malformed local commands produce safe errors.
       assert.equal(client.extensions, "");
-      const response = once(client, "message");
-      client.send('{"type":"disconnect-all","type":"disconnect-all"}');
       const events: unknown[] = [];
       client.on("message", (raw) => events.push(JSON.parse(raw.toString())));
-      await response;
-      await pause(30);
+      client.send('{"type":"disconnect-all","type":"disconnect-all"}');
+      client.send('{"type":"relay-send","packet":{"type":"poll","extra":1}}');
+      await pause(60);
       assert.ok(
-        events.some(
+        events.filter(
           (x) => (x as { code?: string }).code === "INVALID_LOCAL_COMMAND",
-        ),
+        ).length >= 2,
       );
+      assert.equal((await fetch(s.base + "/api/bootstrap")).status, 200);
     } finally {
       for (const ws of sockets) ws.terminate();
       await app.close();
@@ -448,67 +388,38 @@ test(
 );
 
 test(
-  "bounded TCP saturation releases cleanly and service recovers",
-  { timeout: 10000 },
+  "browser event queue is bounded, locks safely on overload, and discards stale events",
   async () => {
     const app = await createApp(options);
-    const sockets: ReturnType<typeof connect>[] = [];
+    const api = new ClientApi(`http://127.0.0.1:${app.uiPort}`);
+    let event!: (value: ServerEvent) => void;
+    api.socket = async (callback) => {
+      event = callback;
+      return {
+        readyState: 1,
+        send() {},
+        close() {},
+        addEventListener() {},
+      } as LocalSocket;
+    };
+    const engine = new ChatEngine(api);
     try {
-      let closed = 0;
-      for (let n = 0; n < 70; n++) {
-        const socket = connect({ host: "127.0.0.1", port: app.endpoint.port });
-        socket.on("error", () => {});
-        socket.on("close", () => closed++);
-        sockets.push(socket);
-      }
-      await pause(150);
-      assert.ok(
-        closed >= 6,
-        "More than 64 unauthenticated TCP connections remained open",
-      );
-      for (const socket of sockets) socket.destroy();
-      await pause(50);
-      assert.equal(
-        (await fetch(`http://127.0.0.1:${app.endpoint.port}/`)).status,
-        404,
-      );
+      await engine.init();
+      await engine.create("Synthetic", "queue test only long private passphrase");
+      for (let n = 0; n < 300; n++)
+        event({ type: "error", code: "FLOOD" });
+      assert.equal(engine.getSnapshot().mode, "locked");
+      assert.equal(engine.getSnapshot().self, undefined);
+      await pause(10);
+      assert.equal(engine.getSnapshot().mode, "locked");
+      await engine.unlock("queue test only long private passphrase");
+      assert.equal(engine.getSnapshot().mode, "ready");
     } finally {
-      for (const socket of sockets) socket.destroy();
+      engine.dispose();
       await app.close();
     }
   },
 );
-
-test("browser event queue is bounded, locks safely on overload, and discards stale events", async () => {
-  const app = await createApp(options);
-  const api = new ClientApi(`http://127.0.0.1:${app.uiPort}`);
-  let event!: (value: ServerEvent) => void;
-  api.socket = async (callback) => {
-    event = callback;
-    return {
-      readyState: 1,
-      send() {},
-      close() {},
-      addEventListener() {},
-    } as LocalSocket;
-  };
-  const engine = new ChatEngine(api);
-  try {
-    await engine.init();
-    await engine.create("Synthetic", "queue test only long private passphrase");
-    for (let n = 0; n < 300; n++)
-      event({ type: "network", endpoint: app.endpoint, devices: [] });
-    assert.equal(engine.getSnapshot().mode, "locked");
-    assert.equal(engine.getSnapshot().self, undefined);
-    await pause(10);
-    assert.equal(engine.getSnapshot().mode, "locked");
-    await engine.unlock("queue test only long private passphrase");
-    assert.equal(engine.getSnapshot().mode, "ready");
-  } finally {
-    engine.dispose();
-    await app.close();
-  }
-});
 
 test("corrupted vault record returns a safe storage error without terminating the service", async () => {
   const app = await createApp(options);

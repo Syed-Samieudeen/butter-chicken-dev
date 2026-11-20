@@ -16,8 +16,7 @@ export async function browserService(options: AppOptions) {
     const app = await createApp(options);
     return { ...app, dataFile: options.dataFile };
   }
-  const uiPort = await free(),
-    port = await free();
+  const uiPort = await free();
   const dataDirectory = join(
     dirname(options.dataFile),
     basename(options.dataFile, ".sqlite"),
@@ -27,9 +26,7 @@ export async function browserService(options: AppOptions) {
     env: {
       ...process.env,
       BC_UI_PORT: String(uiPort),
-      BC_LAN_PORT: String(port),
-      BC_LAN_HOST: "127.0.0.1",
-      BC_DISCOVERY: "false",
+      BC_RELAY_URL: options.relayUrl ?? "ws://127.0.0.1:9/relay",
       BC_DATA_DIR: dataDirectory,
       BC_CONFIG_FILE: join(dataDirectory, "config.env"),
     },
@@ -58,7 +55,6 @@ export async function browserService(options: AppOptions) {
     }
     return {
       uiPort,
-      endpoint: { host: "127.0.0.1", port },
       dataFile: join(dataDirectory, "butter-chicken.sqlite"),
       close,
     };

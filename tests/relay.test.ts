@@ -117,9 +117,10 @@ test(
           !!eb.getSnapshot().relayConnected,
       );
       await ea.invite();
-      const invitation = ea.getSnapshot().invitation!.code;
-      assert.equal(parseInvitation(invitation).relayUrl, relayUrl);
-      await eb.join(invitation);
+      await wait(() => !!ea.getSnapshot().invitation?.code, "Pair code");
+      const code = ea.getSnapshot().invitation!.code!;
+      assert.match(code, /^\d{6}$/);
+      await eb.join(code);
       await wait(
         () => !!ea.getSnapshot().pending && !!eb.getSnapshot().pending,
         "Relay pairing handshake",
@@ -244,24 +245,18 @@ test(
         0,
         "History deletion retains replay tombstone",
       );
-      // Real direct LAN preference when discovery identifies the peer, then automatic fallback after LAN socket loss.
-      (ea as any).publish({
-        devices: [{ ...b.endpoint, label: "test-discovered" }],
-      });
-      ea.reconnect();
-      await wait(() => ea.getSnapshot().path === "LOCAL", "LAN optimization");
-      await ea.sendMessage("same encrypted mail over LAN");
+      // A dropped friend link reconnects automatically through the relay, without re-entering anything.
+      ea.disconnect();
+      await wait(
+        () => ea.getSnapshot().state === "CONNECTED",
+        "Automatic reconnect to friend",
+        25000,
+      );
+      await ea.sendMessage("reconnected through relay");
       await wait(() =>
         eb
           .getSnapshot()
-          .messages.some((m) => m.text === "same encrypted mail over LAN"),
-      );
-      (ea as any).publish({ devices: [] });
-      ea.disconnect();
-      ea.reconnect();
-      await wait(
-        () => ea.getSnapshot().path === "INTERNET",
-        "Fallback to relay",
+          .messages.some((m) => m.text === "reconnected through relay"),
       );
       // Relay outage: keep encrypted outgoing data locally, retry automatically, never plaintext fallback.
       await relay.close();
@@ -295,7 +290,8 @@ test(
         20000,
       );
       await ea.invite();
-      await eb.join(ea.getSnapshot().invitation!.code);
+      await wait(() => !!ea.getSnapshot().invitation?.code, "Second pair code");
+      await eb.join(ea.getSnapshot().invitation!.code!);
       await wait(
         () => !!ea.getSnapshot().pending && !!eb.getSnapshot().pending,
         "Fresh pairing after relay unpin",

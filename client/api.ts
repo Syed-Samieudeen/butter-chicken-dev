@@ -1,18 +1,9 @@
-import type {
-  Archive,
-  DiscoveryDevice,
-  Endpoint,
-  ServerEvent,
-  Vault,
-} from "../shared/protocol.js";
+import type { Archive, ServerEvent, Vault } from "../shared/protocol.js";
 export interface Bootstrap {
   csrf: string;
   dataEpoch: string;
-  endpoint: Endpoint;
   hasVault: boolean;
-  discoveryEnabled: boolean;
-  lanBind: string;
-  relayUrl?: string;
+  relayUrl: string;
 }
 export interface LocalSocket {
   readyState: number;

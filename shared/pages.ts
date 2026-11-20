@@ -6,12 +6,12 @@ export const pageMetadata: Record<
   "/": {
     title: "Butter Chicken · Your local conversation",
     description:
-      "Create a device identity, verify your friend and chat over your own Wi-Fi with encrypted messages and local history.",
+      "Create your identity, pair with a 6-digit code and chat with your friend from any network, with encrypted messages.",
   },
   "/pair": {
     title: "Pair your devices · Butter Chicken",
     description:
-      "Connect two devices with a one-time invitation and compare the shared security code before saving trust.",
+      "Pair with a 6-digit code, then compare the security code before saving trust.",
   },
   "/security": {
     title: "Device security · Butter Chicken",
@@ -21,17 +21,17 @@ export const pageMetadata: Record<
   "/settings": {
     title: "Device settings · Butter Chicken",
     description:
-      "Manage the local connection, appearance, vault locking, conversation history and identity reset.",
+      "Manage the relay connection, appearance, screen lock, conversation history and identity reset.",
   },
   "/help": {
     title: "Getting started · Butter Chicken",
     description:
-      "Learn how two computers connect locally, how to verify a pairing and where to find setup and security answers.",
+      "Learn how two computers pair with a 6-digit code, how to verify the security code, and where to find answers.",
   },
   "/help/faq": {
     title: "Five common questions · Butter Chicken",
     description:
-      "Answers about offline chat, safe pairing, changing Wi-Fi, encrypted history and identity resets.",
+      "Answers about offline messages, safe pairing, the screen lock, encrypted history and resets.",
   },
   "/help/two-computers": {
     title: "Two-computer setup · Butter Chicken",
@@ -41,7 +41,7 @@ export const pageMetadata: Record<
   "/help/use-cases": {
     title: "Example use cases · Butter Chicken",
     description:
-      "Illustrative stories showing how two people can use a local encrypted conversation at home or on a shared LAN.",
+      "Illustrative stories showing how two people can chat through an encrypted relay from anywhere.",
   },
   "/help/security": {
     title: "Encryption and limits · Butter Chicken",
@@ -61,7 +61,7 @@ export const pageMetadata: Record<
   "/privacy": {
     title: "Privacy policy · Butter Chicken",
     description:
-      "How the local app handles encrypted history, device identities, network metadata, browser preferences, QR scanning and deletion.",
+      "How the app handles encrypted history, identities, relay metadata, browser storage and deletion.",
   },
   "/thank-you": {
     title: "Pairing confirmation · Butter Chicken",
@@ -85,7 +85,7 @@ export const applicationSchema = JSON.stringify({
   softwareVersion: "1.0.0",
   applicationCategory: "CommunicationApplication",
   operatingSystem: "Windows, macOS, Linux",
-  softwareRequirements: "Node.js 24 and a reachable local IPv4 network",
+  softwareRequirements: "Node.js 24 and an internet connection",
   description:
-    "A locally run, two-device encrypted chat with verified pairing and encrypted local history.",
+    "A two-person end-to-end encrypted chat with 6-digit pairing, verified security codes and encrypted local history.",
 });

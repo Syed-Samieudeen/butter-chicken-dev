@@ -1,11 +1,9 @@
+import sodium from "libsodium-wrappers-sumo";
 import { authInput, pinInput, signed } from "../shared/relay.js";
 import { z } from "zod";
 import {
   FrameSchema,
-  EndpointSchema,
   type ConnectionState,
-  type DiscoveryDevice,
-  type Endpoint,
   type Envelope,
   type Frame,
   type Hello,
@@ -15,13 +13,17 @@ import {
 import type { Backend, Bootstrap, LocalSocket } from "./api";
 import {
   archiveMessage,
+  bytes,
+  base64,
   cryptoReady,
   createVault,
   makeHello,
   makeInvitation,
   openArchive,
   openEnvelope,
+  openLocal,
   parseInvitation,
+  PrivatePayloadSchema,
   randomChallenge,
   randomId,
   sameIdentity,
@@ -30,19 +32,19 @@ import {
   securityCode,
   tokenMatches,
   unlockVault,
-  verifyHello,
-  wipe,
-  vaultAAD,
-  PrivatePayloadSchema,
-  bytes,
-  base64,
-  openLocal,
   validateIdentity,
+  vaultAAD,
+  verifyHello,
+  verifyPassphrase,
+  wipe,
   type ChatMessage,
   type Friend,
   type Invitation,
   type UnlockedVault,
 } from "./crypto";
+
+/** The screen locks after this much inactivity. Connections stay up while locked. */
+export const IDLE_LOCK_MS = 10 * 60_000;
 
 const MailPayload = z.discriminatedUnion("type", [
   z
@@ -76,7 +78,6 @@ const Payload = z.discriminatedUnion("type", [
         .min(1)
         .max(40)
         .regex(/^[^\u0000-\u001f\u007f]+$/u),
-      endpoint: EndpointSchema,
       inviteId: z
         .string()
         .regex(/^[a-f0-9]{32}$/)
@@ -116,8 +117,6 @@ type Session = {
   expected?: PublicIdentity;
   invitation?: Invitation;
   outbound: boolean;
-  address: string;
-  remoteEndpoint?: Endpoint;
   remoteName?: string;
   auth: boolean;
   ready: boolean;
@@ -138,23 +137,26 @@ export interface PendingPair {
 }
 export interface Snapshot {
   mode: "loading" | "new" | "locked" | "ready";
+  /** The screen is locked after inactivity. The relay connection is still active. */
+  locked: boolean;
   state: ConnectionState;
   self?: { displayName: string; public: PublicIdentity };
   friend?: Friend;
   messages: ChatMessage[];
-  network?: Bootstrap;
-  devices: DiscoveryDevice[];
-  invitation?: { code: string; expires: number };
+  relayUrl?: string;
+  relayConnected?: boolean;
+  path?: "INTERNET" | "OFFLINE";
+  invitation?: { code?: string; expires: number };
+  joining?: boolean;
   pending?: PendingPair;
   notice?: string;
   warning?: string;
   lastSeen?: string;
-  path?: "LOCAL" | "INTERNET" | "OFFLINE";
-  relayConnected?: boolean;
 }
 
 /** All encryption, key possession checks and trust decisions happen in this browser module. */
 export class ChatEngine {
+  private relayUrl = "";
   private relayReady = false;
   private relayPaired = false;
   private relayFailures = 0;
@@ -171,37 +173,86 @@ export class ChatEngine {
   >();
   private active?: string;
   private candidate?: string;
-  private invitation?: Invitation;
+  private invitation?: { invitation: Invitation; code?: string };
   private invitationUsed = false;
+  private history: ChatMessage[] = [];
+  private uiLocked = false;
+  private lastActivity = Date.now();
   private listeners = new Set<() => void>();
   private queue: Promise<void> = Promise.resolve();
   private timer?: ReturnType<typeof setInterval>;
+  private idleTimer?: ReturnType<typeof setInterval>;
   private lastConnect = 0;
   private lastPing = 0;
   private epoch = 0;
   private snapshot: Snapshot = {
     mode: "loading",
-    state: "DISCOVERING",
-    devices: [],
+    locked: false,
+    state: "DISCONNECTED",
     messages: [],
   };
   constructor(readonly api: Backend) {}
+
   getSnapshot = (): Snapshot => this.snapshot;
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
   };
   private publish(patch: Partial<Snapshot> = {}): void {
-    this.snapshot = { ...this.snapshot, ...patch };
+    const next = { ...this.snapshot, ...patch };
+    if (this.uiLocked) {
+      // Message text and codes stay hidden while the screen is locked. Names and connection state remain for navigation.
+      next.messages = [];
+      next.invitation = undefined;
+      next.pending = undefined;
+    }
+    next.locked = this.uiLocked;
+    this.snapshot = next;
     for (const listener of this.listeners) listener();
   }
+  private visibleMessages(): ChatMessage[] {
+    return this.uiLocked ? [] : this.history;
+  }
+  private pendingFromCandidate(): PendingPair | undefined {
+    const session = this.candidate ? this.sessions.get(this.candidate) : undefined;
+    if (!session?.hello || !session.remoteName || !this.unlocked) return undefined;
+    return {
+      identity: session.hello.identity,
+      displayName: session.remoteName,
+      code: securityCode(this.unlocked.identity.public, session.hello.identity),
+      localVerified: session.localVerified,
+      remoteVerified: session.remoteVerified,
+    };
+  }
+  private showFullView(): void {
+    const u = this.unlocked;
+    if (!u) return;
+    this.publish({
+      locked: false,
+      self: { displayName: u.identity.displayName, public: u.identity.public },
+      friend: u.friend,
+      messages: this.history,
+      invitation: this.invitation
+        ? { code: this.invitation.code, expires: this.invitation.invitation.expires }
+        : undefined,
+      pending: this.pendingFromCandidate(),
+    });
+  }
+
   async init(): Promise<void> {
     await cryptoReady;
-    const network = await this.api.bootstrap();
-    if (network.hasVault) {
+    const boot: Bootstrap = await this.api.bootstrap();
+    this.relayUrl = boot.relayUrl;
+    if (boot.hasVault) {
       try {
-        const sessionKeyB64 = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("bc:v1:sessionKey") : null;
-        const sessionSalt = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("bc:v1:salt") : null;
+        const sessionKeyB64 =
+          typeof sessionStorage !== "undefined"
+            ? sessionStorage.getItem("bc:v1:sessionKey")
+            : null;
+        const sessionSalt =
+          typeof sessionStorage !== "undefined"
+            ? sessionStorage.getItem("bc:v1:salt")
+            : null;
         if (sessionKeyB64 && sessionSalt) {
           const key = bytes(sessionKeyB64);
           const vault = await this.api.vault();
@@ -214,8 +265,10 @@ export class ChatEngine {
             const signSecret = bytes(payload.identity.signSecret, 64);
             const archiveKey = bytes(payload.identity.archiveKey, 32);
             if (
-              base64(sodium.crypto_scalarmult_base(boxSecret)) === publicIdentity.boxKey &&
-              base64(sodium.crypto_sign_ed25519_sk_to_pk(signSecret)) === publicIdentity.signKey
+              base64(sodium.crypto_scalarmult_base(boxSecret)) ===
+                publicIdentity.boxKey &&
+              base64(sodium.crypto_sign_ed25519_sk_to_pk(signSecret)) ===
+                publicIdentity.signKey
             ) {
               if (payload.friend) validateIdentity(payload.friend.public);
               this.unlocked = {
@@ -231,20 +284,23 @@ export class ChatEngine {
                 salt: vault.salt,
                 friend: payload.friend,
               };
-              this.publish({ mode: "ready", network });
+              this.publish({ mode: "ready", relayUrl: this.relayUrl });
               await this.activate();
               return;
             }
           }
         }
       } catch {
-        try { sessionStorage.removeItem("bc:v1:sessionKey"); sessionStorage.removeItem("bc:v1:salt"); } catch {}
+        try {
+          sessionStorage.removeItem("bc:v1:sessionKey");
+          sessionStorage.removeItem("bc:v1:salt");
+        } catch {}
       }
     }
     this.publish({
-      mode: network.hasVault ? "locked" : "new",
-      state: "PAIRING_REQUIRED",
-      network,
+      mode: boot.hasVault ? "locked" : "new",
+      state: "DISCONNECTED",
+      relayUrl: this.relayUrl,
     });
   }
   async create(name: string, passphrase: string): Promise<void> {
@@ -274,6 +330,7 @@ export class ChatEngine {
     await this.activate();
   }
   async unlock(passphrase: string): Promise<void> {
+    if (this.unlocked && this.uiLocked) return this.unlockScreen(passphrase);
     if (this.unlocked) throw new Error("Identity already unlocked");
     const epoch = this.epoch;
     const vault = await this.api.vault();
@@ -295,22 +352,44 @@ export class ChatEngine {
       throw error;
     }
   }
+  /** Re-checks the passphrase after the idle lock. Keys already in memory keep the connection alive. */
+  async unlockScreen(passphrase: string): Promise<void> {
+    const u = this.unlocked;
+    if (!u) throw new Error("No identity found");
+    if (!(await verifyPassphrase(u, passphrase)))
+      throw new Error("That passphrase is not correct.");
+    if (this.unlocked !== u) throw new Error("Session changed. Unlock again.");
+    this.uiLocked = false;
+    this.lastActivity = Date.now();
+    this.showFullView();
+    this.publish({ notice: undefined });
+  }
+  /** Locks the screen only. Messages stay encrypted in memory and the relay connection stays up. */
+  lockScreen(): void {
+    if (!this.unlocked || this.uiLocked) return;
+    this.uiLocked = true;
+    this.publish({});
+  }
+  touch(): void {
+    this.lastActivity = Date.now();
+  }
   private async activate(): Promise<void> {
     const u = this.unlocked!;
     const rows = await this.api.history();
     if (this.unlocked !== u) throw new Error("Vault locked");
-    const history = rows
+    this.history = rows
       .map((row) => openArchive(u.identity, row))
       .filter((m) => !u.friend || m.peerId === u.friend.public.id);
+    this.uiLocked = false;
+    this.lastActivity = Date.now();
     this.publish({
       mode: "ready",
-      self: { displayName: u.identity.displayName, public: u.identity.public },
-      friend: u.friend,
-      messages: history,
-      state: u.friend ? "DISCOVERING" : "PAIRING_REQUIRED",
+      relayUrl: this.relayUrl,
+      state: u.friend ? "DISCONNECTED" : "PAIRING_REQUIRED",
       notice: undefined,
       warning: undefined,
     });
+    this.showFullView();
     const epoch = this.epoch;
     let queuedEvents = 0;
     const transport = await this.api.socket(
@@ -327,7 +406,7 @@ export class ChatEngine {
         queuedEvents++;
         this.queue = this.queue
           .then(() => {
-            if (this.epoch === epoch) return this.handle(event);
+            if (this.epoch === epoch) return this.handleEvent(event);
           })
           .catch(() => {
             if (this.epoch === epoch)
@@ -339,17 +418,17 @@ export class ChatEngine {
             queuedEvents--;
           });
       },
-      (code) => {
+      () => {
         if (this.unlocked === u && this.epoch === epoch) {
           this.active = undefined;
           this.sessions.clear();
           this.requests.clear();
           this.publish({
             state: "DISCONNECTED",
+            relayConnected: false,
+            path: "OFFLINE",
             notice:
-              code === 4009
-                ? "This identity is already open in another tab. Close that tab, then unlock here."
-                : "Local service disconnected. Restart it and reload this page.",
+              "The local service stopped. Keep the Butter Chicken terminal running, then reload this page.",
           });
         }
       },
@@ -359,7 +438,7 @@ export class ChatEngine {
       throw new Error("Vault locked");
     }
     this.transport = transport;
-    if (this.snapshot.network?.relayUrl) this.openRelay();
+    this.openRelay();
     let tickPending = false;
     this.timer = setInterval(() => {
       if (tickPending || this.epoch !== epoch) return;
@@ -370,7 +449,7 @@ export class ChatEngine {
         })
         .catch(() =>
           this.publish({
-            notice: "The connection could not be refreshed. Try reconnecting.",
+            notice: "The connection could not be refreshed. Trying again.",
           }),
         )
         .finally(() => {
@@ -378,7 +457,15 @@ export class ChatEngine {
         });
     }, 5000);
     this.timer.unref?.();
+    clearInterval(this.idleTimer);
+    this.idleTimer = setInterval(() => {
+      if (this.epoch !== epoch) return;
+      if (!this.uiLocked && Date.now() - this.lastActivity > IDLE_LOCK_MS)
+        this.lockScreen();
+    }, 15_000);
+    this.idleTimer.unref?.();
   }
+  /** Full sign-out for this browser: wipes keys from memory and closes the relay connection. */
   lock(): void {
     this.epoch++;
     this.relayReady = false;
@@ -386,16 +473,20 @@ export class ChatEngine {
     this.relaySessions.clear();
     this.readSent.clear();
     clearInterval(this.timer);
+    clearInterval(this.idleTimer);
     this.timer = undefined;
+    this.idleTimer = undefined;
     if (this.unlocked) wipe(this.unlocked);
     this.unlocked = undefined;
     this.transport?.close();
     this.transport = undefined;
     this.sessions.clear();
     this.requests.clear();
+    this.history = [];
     this.active = undefined;
     this.candidate = undefined;
     this.invitation = undefined;
+    this.uiLocked = false;
     this.publish({
       mode: "locked",
       path: "OFFLINE",
@@ -412,11 +503,14 @@ export class ChatEngine {
   }
   private command(value: unknown): void {
     if (this.transport?.readyState !== 1)
-      throw new Error("Local service is disconnected");
+      throw new Error("The local service is not running.");
     this.transport.send(JSON.stringify(value));
   }
+  private relayCommand(packet: unknown): void {
+    this.command({ type: "relay-send", packet });
+  }
   private sendFrame(id: string, frame: Frame): void {
-    this.command({ type: "send", connectionId: id, frame });
+    this.relayCommand({ type: "frame", connectionId: id, frame });
   }
   private send(
     session: Session,
@@ -442,69 +536,81 @@ export class ChatEngine {
   }
   private drop(id: string): void {
     try {
-      this.command({ type: "disconnect", connectionId: id });
+      this.relayCommand({ type: "drop", connectionId: id });
     } catch {}
+    this.endSession(id);
+  }
+  private endSession(id: string): void {
+    this.relaySessions.delete(id);
     this.sessions.delete(id);
     if (this.candidate === id) {
       this.candidate = undefined;
-      this.publish({ pending: undefined });
+      this.publish({
+        pending: undefined,
+        notice:
+          "Pairing disconnected. Create a new code and try again.",
+      });
     }
     if (this.active === id) {
       this.active = undefined;
-      this.publish({ state: "DISCONNECTED" });
+      this.publish({
+        state: this.snapshot.warning ? "IDENTITY_CHANGED" : "DISCONNECTED",
+        path: "OFFLINE",
+      });
     }
   }
+  /** Creates a 6-digit pairing code for this identity. The relay stores the signed invitation for ten minutes. */
   async invite(): Promise<void> {
     if (!this.unlocked || this.unlocked.friend)
-      throw new Error(
-        "Remove the existing trusted device before pairing again",
-      );
+      throw new Error("Remove the existing trusted device before pairing again.");
+    if (!this.relayReady)
+      throw new Error("Connecting to the relay. Try again in a moment.");
     this.cancelPairing();
-    const { invitation, code } = makeInvitation(
+    const { invitation, text } = makeInvitation(
       this.unlocked.identity,
-      this.snapshot.network!.endpoint,
-      Date.now(),
-      this.snapshot.network?.relayUrl,
+      this.relayUrl,
     );
-    this.invitation = invitation;
+    this.invitation = { invitation };
     this.invitationUsed = false;
+    this.relayCommand({ type: "pair-create", invitation: text });
     this.publish({
-      invitation: { code, expires: invitation.expires },
+      invitation: { expires: invitation.expires },
       state: "PAIRING_REQUIRED",
       notice: undefined,
     });
   }
-  async join(
-    code: string,
-    override?: { host: string; port: number },
-  ): Promise<void> {
+  /** Joins a friend's pairing with the 6-digit code. Trust still needs the safety-code check. */
+  async join(code: string): Promise<void> {
     if (!this.unlocked || this.unlocked.friend)
-      throw new Error(
-        "Remove the existing trusted device before pairing again",
-      );
-    const invitation = parseInvitation(code);
-    if (
-      invitation.relayUrl &&
-      invitation.relayUrl !== this.snapshot.network?.relayUrl
-    )
-      throw new Error(
-        "Configure the same relay URL as your friend before pairing. The signed invitation names a different relay.",
-      );
-    if (sameIdentity(invitation.identity, this.unlocked.identity.public))
-      throw new Error("Use the invitation from your friend’s device");
+      throw new Error("Remove the existing trusted device before pairing again.");
+    const digits = code.trim();
+    if (!/^\d{6}$/.test(digits))
+      throw new Error("Enter the 6-digit code from your friend.");
+    if (!this.relayReady)
+      throw new Error("Connecting to the relay. Try again in a moment.");
     this.cancelPairing();
-    this.connectInternal(
-      {
-        ...(override ?? invitation.endpoint),
-        nodeId: invitation.endpoint.nodeId,
-      },
-      invitation.identity,
-      invitation,
-    );
+    this.publish({ joining: true, notice: undefined });
+    this.relayCommand({ type: "pair-join", code: digits });
+  }
+  private async onPairOffer(text: string): Promise<void> {
+    this.publish({ joining: false });
+    const invitation = parseInvitation(text);
+    if (invitation.relayUrl !== this.relayUrl)
+      throw new Error(
+        "Your friend is using a different relay. Both computers must use the same relay.",
+      );
+    if (sameIdentity(invitation.identity, this.unlocked!.identity.public))
+      throw new Error("Use the code from your friend’s device.");
+    this.connectInternal(invitation.identity, invitation);
   }
   cancelPairing(): void {
     for (const session of this.sessions.values())
       if (session.id !== this.active) this.drop(session.id);
+    if (this.invitation && this.relayReady) {
+      try {
+        this.relayCommand({ type: "pair-cancel" });
+      } catch {}
+    }
     this.requests.clear();
     this.invitation = undefined;
     this.invitationUsed = false;
@@ -512,6 +618,7 @@ export class ChatEngine {
     this.publish({
       invitation: undefined,
       pending: undefined,
+      joining: false,
       state: this.active
         ? "CONNECTED"
         : this.unlocked?.friend
@@ -519,181 +626,38 @@ export class ChatEngine {
           : "PAIRING_REQUIRED",
     });
   }
-  reconnect(host?: string, port?: number): void {
-    if (!this.unlocked?.friend) throw new Error("Pair a trusted device first");
-    if (this.active) this.drop(this.active);
-    this.publish({ warning: undefined });
-    const friend = this.unlocked.friend;
-    const found = this.snapshot.devices.find(
-      (x) => x.nodeId === friend.endpoint.nodeId,
-    );
-    this.connectInternal(
-      {
-        ...(found ?? friend.endpoint),
-        ...(host ? { host, port: port ?? 4455 } : {}),
-      },
-      friend.public,
-    );
-  }
   private connectInternal(
-    endpoint: Endpoint,
-    expected?: PublicIdentity,
+    expected: PublicIdentity,
     invitation?: Invitation,
   ): void {
     const requestId = randomId();
     this.requests.set(requestId, { expected, invitation, at: Date.now() });
     this.lastConnect = Date.now();
-    if (
-      this.snapshot.network?.relayUrl &&
-      this.relayReady &&
-      expected &&
-      !this.snapshot.devices.some((d) => d.nodeId === endpoint.nodeId)
-    ) {
-      this.relayCommand({ type: "link", peerId: expected.id, requestId });
-      this.publish({ state: "CONNECTING" });
-      return;
-    }
-    this.command({
-      type: "connect",
-      host: endpoint.host,
-      port: endpoint.port,
-      requestId,
-    });
+    this.relayCommand({ type: "link", peerId: expected.id, requestId });
     this.publish({ state: "CONNECTING", notice: undefined });
   }
-  private async handle(event: ServerEvent): Promise<void> {
+  private async handleEvent(event: ServerEvent): Promise<void> {
     if (!this.unlocked) return;
-    if (event.type === "relay-close") {
-      this.relayReady = false;
-      this.relayPaired = false;
-      this.relayFailures = Math.min(this.relayFailures + 1, 6);
-      this.relayNext =
-        Date.now() +
-        Math.min(60000, 1000 * 2 ** this.relayFailures) +
-        Math.random() * 1000;
-      for (const id of [...this.relaySessions])
-        await this.handle({ type: "peer-close", connectionId: id });
-      this.relaySessions.clear();
-      this.publish({
-        relayConnected: false,
-        path: this.active ? "LOCAL" : "OFFLINE",
-      });
-      return;
-    }
-    if (event.type === "relay") {
-      await this.handleRelay(event.packet);
-      return;
-    }
-    if (event.type === "network") {
-      const endpoint = EndpointSchema.parse(event.endpoint);
-      this.publish({
-        network: { ...this.snapshot.network!, endpoint },
-        devices: event.devices.slice(0, 64).map((x) => ({
-          ...EndpointSchema.parse(x),
-          label: String(x.label).slice(0, 80),
-        })),
-      });
-      return;
-    }
-    if (event.type === "error") {
-      const failed = event.requestId
-        ? this.requests.get(event.requestId)
-        : undefined;
-      if (failed?.expected && this.relayReady && event.requestId) {
-        this.relayCommand({
-          type: "link",
-          peerId: failed.expected.id,
-          requestId: event.requestId,
-        });
-        return;
-      }
-      if (event.requestId) this.requests.delete(event.requestId);
-      if (!this.active)
-        this.publish({
-          state: this.unlocked.friend ? "DISCONNECTED" : "PAIRING_REQUIRED",
-          notice:
-            event.code === "LAN_ENDPOINT_REQUIRED"
-              ? "Use a private LAN IPv4 address and the LAN port. Public internet connections are disabled."
-              : "Could not reach that device. Check its address, LAN port, firewall and unlocked app.",
-        });
-      return;
-    }
-    if (event.type === "peer-close") {
-      const wasActive = this.active === event.connectionId;
-      this.relaySessions.delete(event.connectionId);
-      this.sessions.delete(event.connectionId);
-      if (this.candidate === event.connectionId) {
-        this.candidate = undefined;
-        this.publish({
-          pending: undefined,
-          notice:
-            "Pairing disconnected. Create a new invitation and try again.",
-        });
-      }
-      if (wasActive) {
-        this.active = undefined;
-        this.publish({
-          state: this.snapshot.warning ? "IDENTITY_CHANGED" : "DISCONNECTED",
-          path: this.relayReady ? "INTERNET" : "OFFLINE",
-        });
-      } else if (
-        !this.active &&
-        !this.candidate &&
-        this.snapshot.state !== "IDENTITY_CHANGED"
-      )
-        this.publish({
-          state: this.unlocked.friend ? "DISCONNECTED" : "PAIRING_REQUIRED",
-        });
-      return;
-    }
-    if (event.type === "peer-open") {
-      const request = event.requestId
-        ? this.requests.get(event.requestId)
-        : undefined;
-      if (event.requestId) this.requests.delete(event.requestId);
-      const session: Session = {
-        id: event.connectionId,
-        outbound: event.outbound,
-        address: event.address,
-        expected: request?.expected,
-        invitation: request?.invitation,
-        challenge: randomChallenge(),
-        auth: false,
-        ready: false,
-        localVerified: false,
-        remoteVerified: false,
-        opened: Date.now(),
-        lastAuthenticated: Date.now(),
-        controls: new Set(),
-      };
-      this.sessions.set(session.id, session);
-      this.sendFrame(
-        session.id,
-        makeHello(this.unlocked.identity, session.challenge),
-      );
-      if (!this.active) this.publish({ state: "AUTHENTICATING" });
-      return;
-    }
-    const session = this.sessions.get(event.connectionId);
-    if (!session) return;
-    try {
-      if (event.frame.kind === "hello")
-        return this.onHello(session, event.frame);
-      await this.onBox(session, event.frame);
-    } catch {
-      this.drop(session.id);
-      this.publish({
-        notice:
-          "This connection failed cryptographic verification. No message or trust change was accepted.",
-      });
-    }
+    if (event.type === "relay") return this.handleRelay(event.packet);
+    if (event.type === "relay-close") return this.onRelayClosed();
+    if (event.type === "error")
+      this.publish({ notice: "The local service rejected a request." });
+  }
+  private onRelayClosed(): void {
+    this.relayReady = false;
+    this.relayPaired = false;
+    this.relayFailures = Math.min(this.relayFailures + 1, 6);
+    this.relayNext =
+      Date.now() +
+      Math.min(60000, 1000 * 2 ** this.relayFailures) +
+      Math.random() * 1000;
+    for (const id of [...this.relaySessions]) this.endSession(id);
+    this.relaySessions.clear();
+    this.publish({ relayConnected: false, path: "OFFLINE" });
   }
   private onHello(session: Session, input: Hello): void {
     const hello = verifyHello(input);
-    if (
-      session.hello ||
-      hello.identity.id === this.unlocked!.identity.public.id
-    )
+    if (session.hello || hello.identity.id === this.unlocked!.identity.public.id)
       throw new Error("Unexpected identity");
     const expected = session.expected ?? this.unlocked!.friend?.public;
     if (expected && !sameIdentity(expected, hello.identity)) {
@@ -701,7 +665,7 @@ export class ChatEngine {
         this.publish({
           state: "IDENTITY_CHANGED",
           warning:
-            "The device at this address has a different identity from your trusted friend. Disconnect and verify with your friend before removing the existing pairing.",
+            "The device at this code has a different identity from your trusted friend. Disconnect and verify with your friend before removing the existing pairing.",
         });
       else
         this.publish({
@@ -715,11 +679,11 @@ export class ChatEngine {
       !session.invitation &&
       (!this.invitation ||
         this.invitationUsed ||
-        this.invitation.expires < Date.now())
+        this.invitation.invitation.expires < Date.now())
     ) {
       this.publish({
         notice:
-          "Unknown device ignored. Generate an invitation if you want to pair.",
+          "Unknown device ignored. Create a code if you want to pair.",
       });
       this.drop(session.id);
       return;
@@ -732,7 +696,6 @@ export class ChatEngine {
     this.send(session, {
       type: "auth",
       name: this.unlocked!.identity.displayName,
-      endpoint: this.snapshot.network!.endpoint,
       ...(invite
         ? { inviteId: invite.inviteId, token: invite.token }
         : session.inviteId
@@ -743,14 +706,10 @@ export class ChatEngine {
   private async onBox(session: Session, frame: Envelope): Promise<void> {
     const u = this.unlocked!;
     if (!session.hello) throw new Error("Handshake required");
-    const opened = openEnvelope(
-      this.unlocked!.identity,
-      session.hello.identity,
-      frame,
-    );
+    const opened = openEnvelope(u.identity, session.hello.identity, frame);
     if (
       this.active === session.id &&
-      this.unlocked?.friend &&
+      u.friend &&
       MailPayload.safeParse(opened.payload).success
     ) {
       await this.receiveMail(frame);
@@ -765,20 +724,19 @@ export class ChatEngine {
     session.lastAuthenticated = Date.now();
     if (payload.type !== "chat") {
       if (session.controls.has(frame.messageId)) return;
-      if (session.controls.size >= 20_000)
-        throw new Error("Reconnect required");
+      if (session.controls.size >= 20_000) throw new Error("Reconnect required");
       session.controls.add(frame.messageId);
     }
     if (payload.type === "auth") {
       if (session.auth) throw new Error("Repeated authentication");
-      if (!this.unlocked!.friend) {
+      if (!u.friend) {
         if (session.invitation) {
           if (payload.inviteId !== session.invitation.inviteId || payload.token)
             throw new Error("Unexpected pairing response");
           session.inviteId = session.invitation.inviteId;
           session.expires = session.invitation.expires;
         } else {
-          const invite = this.invitation;
+          const invite = this.invitation?.invitation;
           if (
             !invite ||
             this.invitationUsed ||
@@ -787,7 +745,7 @@ export class ChatEngine {
             !payload.token ||
             !tokenMatches(payload.token, invite.token)
           )
-            throw new Error("Wrong or reused invitation");
+            throw new Error("Wrong or reused code");
           this.invitationUsed = true;
           session.inviteId = invite.inviteId;
           session.expires = invite.expires;
@@ -798,14 +756,13 @@ export class ChatEngine {
         throw new Error("Unexpected pairing");
       session.auth = true;
       session.remoteName = payload.name;
-      session.remoteEndpoint = payload.endpoint;
       this.send(session, { type: "ready" });
       return;
     }
     if (!session.auth) throw new Error("Authentication required");
     if (payload.type === "ready") {
       session.ready = true;
-      if (this.unlocked!.friend) await this.connected(session);
+      if (u.friend) await this.connected(session);
       else {
         if (this.candidate && this.candidate !== session.id)
           throw new Error("Pairing already in progress");
@@ -827,7 +784,7 @@ export class ChatEngine {
       await this.completePair(session);
       return;
     }
-    if (this.active !== session.id || !this.unlocked!.friend)
+    if (this.active !== session.id || !u.friend)
       throw new Error("Trust required");
     if (payload.type === "chat") {
       if (new TextEncoder().encode(payload.text).length > 32_000)
@@ -841,21 +798,18 @@ export class ChatEngine {
         receivedAt: new Date().toISOString(),
       };
       const inserted = await this.api.receive(
-        archiveMessage(this.unlocked!.identity, message.peerId, message, true),
+        archiveMessage(u.identity, message.peerId, message, true),
       );
       if (this.unlocked !== u || this.sessions.get(session.id) !== session)
         return;
-      if (inserted)
-        this.publish({
-          messages: [
-            ...this.snapshot.messages,
-            { ...message, delivered: true },
-          ],
-        });
+      if (inserted) {
+        this.history = [...this.history, { ...message, delivered: true }];
+        this.publish({ messages: this.visibleMessages() });
+      }
       // Duplicate retransmissions are acknowledged, but never inserted or displayed twice.
       this.send(session, { type: "ack", messageId: frame.messageId });
     } else if (payload.type === "ack") {
-      const message = this.snapshot.messages.find(
+      const message = this.history.find(
         (x) =>
           x.id === payload.messageId &&
           x.from === "me" &&
@@ -865,11 +819,10 @@ export class ChatEngine {
         await this.api.delivered(message.id);
         if (this.unlocked !== u || this.sessions.get(session.id) !== session)
           return;
-        this.publish({
-          messages: this.snapshot.messages.map((x) =>
-            x.id === message.id ? { ...x, delivered: true } : x,
-          ),
-        });
+        this.history = this.history.map((x) =>
+          x.id === message.id ? { ...x, delivered: true } : x,
+        );
+        this.publish({ messages: this.visibleMessages() });
       }
     } else if (payload.type === "ping") this.send(session, { type: "pong" });
   }
@@ -878,10 +831,7 @@ export class ChatEngine {
       pending: {
         identity: session.hello!.identity,
         displayName: session.remoteName!,
-        code: securityCode(
-          this.unlocked!.identity.public,
-          session.hello!.identity,
-        ),
+        code: securityCode(this.unlocked!.identity.public, session.hello!.identity),
         localVerified: session.localVerified,
         remoteVerified: session.remoteVerified,
       },
@@ -889,11 +839,9 @@ export class ChatEngine {
     });
   }
   async verifyPairing(): Promise<void> {
-    const session = this.candidate
-      ? this.sessions.get(this.candidate)
-      : undefined;
+    const session = this.candidate ? this.sessions.get(this.candidate) : undefined;
     if (!session?.auth || !session.ready || (session.expires ?? 0) < Date.now())
-      throw new Error("No active pairing. Create a new invitation.");
+      throw new Error("No active pairing. Create a new code.");
     if (session.localVerified) return;
     session.localVerified = true;
     this.send(session, { type: "verify", inviteId: session.inviteId });
@@ -901,18 +849,13 @@ export class ChatEngine {
     await this.completePair(session);
   }
   private async completePair(session: Session): Promise<void> {
-    if (
-      !session.localVerified ||
-      !session.remoteVerified ||
-      this.unlocked!.friend
-    )
+    if (!session.localVerified || !session.remoteVerified || this.unlocked!.friend)
       return;
     const u = this.unlocked!;
     const now = new Date().toISOString();
-    this.unlocked!.friend = {
+    u.friend = {
       public: session.hello!.identity,
       displayName: session.remoteName!,
-      endpoint: session.remoteEndpoint!,
       trustedSince: now,
       verifiedAt: now,
       pairId: session.inviteId,
@@ -924,14 +867,13 @@ export class ChatEngine {
       if (this.unlocked === u) u.friend = undefined;
       throw error;
     }
-    if (this.unlocked !== u || this.sessions.get(session.id) !== session)
-      return;
+    if (this.unlocked !== u || this.sessions.get(session.id) !== session) return;
     this.invitation = undefined;
     this.candidate = undefined;
     this.publish({
       invitation: undefined,
       pending: undefined,
-      friend: this.unlocked!.friend,
+      friend: u.friend,
     });
     this.pinRelay();
     await this.connected(session);
@@ -943,25 +885,14 @@ export class ChatEngine {
       return;
     }
     this.active = session.id;
-    const friend = this.unlocked!.friend!;
-    this.unlocked!.friend = {
-      ...friend,
-      lastSeen: new Date().toISOString(),
-      endpoint: {
-        ...session.remoteEndpoint!,
-        host:
-          session.outbound && session.address !== "relay"
-            ? session.address
-            : session.remoteEndpoint!.host,
-      },
-    };
-    await this.api.saveVault(sealVault(this.unlocked!));
-    if (this.unlocked !== u || this.sessions.get(session.id) !== session)
-      return;
+    const friend = u.friend!;
+    u.friend = { ...friend, lastSeen: new Date().toISOString() };
+    await this.api.saveVault(sealVault(u));
+    if (this.unlocked !== u || this.sessions.get(session.id) !== session) return;
     this.publish({
       state: "CONNECTED",
-      path: this.relaySessions.has(session.id) ? "INTERNET" : "LOCAL",
-      friend: this.unlocked!.friend,
+      path: "INTERNET",
+      friend: u.friend,
       notice: undefined,
       warning: undefined,
     });
@@ -971,73 +902,43 @@ export class ChatEngine {
     const u = this.unlocked;
     const session = this.active ? this.sessions.get(this.active) : undefined;
     const value = text.trim();
-    if (
-      !this.unlocked?.friend ||
-      (!session && !this.snapshot.network?.relayUrl)
-    )
-      throw new Error("Reconnect securely before sending");
-    if (
-      !value ||
-      value.length > 8000 ||
-      new TextEncoder().encode(value).length > 32_000
-    )
-      throw new Error("Use 1 to 8000 characters, within 32 KB");
+    if (!u?.friend)
+      throw new Error("Pair with your friend before sending messages.");
+    if (!u.friend.pairId)
+      throw new Error("Pair again with the new 6-digit code to enable messaging.");
+    if (!value || value.length > 8000 || new TextEncoder().encode(value).length > 32_000)
+      throw new Error("Use 1 to 8000 characters, within 32 KB.");
     const id = randomId();
     const sentAt = new Date().toISOString();
-    let wire: Envelope | undefined;
-    let sequence: number | undefined;
-    if (this.snapshot.network?.relayUrl && this.unlocked.friend.pairId) {
-      sequence = (this.unlocked.identity.sequence ?? 0) + 1;
-      this.unlocked.identity.sequence = sequence;
-      await this.api.saveVault(sealVault(this.unlocked));
-      wire = sealEnvelope(
-        this.unlocked.identity,
-        this.unlocked.friend.public,
-        {
-          type: "mail-chat",
-          pairId: this.unlocked.friend.pairId,
-          sequence,
-          text: value,
-        },
-        id,
-        sentAt,
-      );
-    }
-    if (!session && !wire)
-      throw new Error(
-        "Re-pair once to enable internet offline delivery for a legacy pairing",
-      );
+    u.identity.sequence = (u.identity.sequence ?? 0) + 1;
+    const sequence = u.identity.sequence;
+    await this.api.saveVault(sealVault(u));
+    const wire = sealEnvelope(
+      u.identity,
+      u.friend.public,
+      { type: "mail-chat", pairId: u.friend.pairId, sequence, text: value },
+      id,
+      sentAt,
+    );
     const message = {
       id,
-      ...(wire ? { wire, sequence } : {}),
-      peerId: this.unlocked.friend.public.id,
+      wire,
+      sequence,
+      peerId: u.friend.public.id,
       from: "me" as const,
       text: value,
       sentAt,
     };
     await this.api.outgoing(
-      archiveMessage(this.unlocked.identity, message.peerId, message, false),
+      archiveMessage(u.identity, message.peerId, message, false),
     );
-    if (this.unlocked !== u)
-      throw new Error(
-        "The vault locked before sending. The encrypted pending message is retained locally.",
-      );
-    this.publish({
-      messages: [...this.snapshot.messages, { ...message, delivered: false }],
-    });
-    if (wire) {
-      this.transmitMail(wire);
-      return;
-    }
-    this.send(
-      session!,
-      { type: "chat", text: value },
-      message.id,
-      message.sentAt,
-    );
+    if (this.unlocked !== u) throw new Error("The vault locked before sending. The encrypted pending message is retained locally.");
+    this.history = [...this.history, { ...message, delivered: false }];
+    this.publish({ messages: this.visibleMessages() });
+    this.transmitMail(wire);
   }
   private flushPending(session: Session): void {
-    for (const message of this.snapshot.messages
+    for (const message of this.history
       .filter(
         (x) =>
           x.from === "me" &&
@@ -1046,16 +947,6 @@ export class ChatEngine {
       )
       .slice(0, 50))
       if (message.wire) this.transmitMail(message.wire);
-      else
-        this.send(
-          session,
-          { type: "chat", text: message.text },
-          message.id,
-          message.sentAt,
-        );
-  }
-  private relayCommand(packet: unknown): void {
-    this.command({ type: "relay-send", packet });
   }
   private openRelay(): void {
     this.relayNext = Date.now() + 10000;
@@ -1086,11 +977,7 @@ export class ChatEngine {
         type: "auth",
         identity: this.unlocked!.identity.public,
         signature: signed(
-          authInput(
-            challenge,
-            this.unlocked!.identity.public,
-            this.snapshot.network!.relayUrl!,
-          ),
+          authInput(challenge, this.unlocked!.identity.public, this.relayUrl),
           this.unlocked!.identity.signSecret,
         ),
       });
@@ -1098,13 +985,19 @@ export class ChatEngine {
       this.relayReady = true;
       this.relayFailures = 0;
       this.readSent.clear();
-      this.publish({
-        relayConnected: true,
-        path: this.active ? this.snapshot.path : "INTERNET",
-      });
+      this.publish({ relayConnected: true, path: this.active ? "INTERNET" : "OFFLINE" });
       if (!this.unlocked?.friend) this.relayCommand({ type: "unpin" });
       else this.pinRelay();
-      if (this.unlocked?.friend && !this.active) this.reconnect();
+      if (this.unlocked?.friend && !this.active) this.reconnectFriend();
+    } else if (p.type === "pair-code") {
+      const code = z.string().regex(/^\d{6}$/).parse(p.code);
+      if (this.invitation) this.invitation.code = code;
+      this.publish({
+        invitation: { code, expires: Number(p.expires) },
+        notice: undefined,
+      });
+    } else if (p.type === "pair-offer") {
+      await this.onPairOffer(z.string().max(3000).parse(p.invitation));
     } else if (p.type === "paired") {
       if (p.pairId !== this.unlocked?.friend?.pairId)
         throw Error("Wrong relay pairing");
@@ -1125,9 +1018,7 @@ export class ChatEngine {
         })
         .strict()
         .parse(p);
-      if (this.relaySessions.size >= 8) throw Error("Relay link capacity");
-      this.relaySessions.add(e.connectionId);
-      await this.handle(e);
+      this.onPeerOpen(e);
     } else if (p.type === "frame") {
       const e = z
         .object({
@@ -1137,59 +1028,110 @@ export class ChatEngine {
         })
         .strict()
         .parse(p);
-      await this.handle(e);
-    } else if (p.type === "peer-close")
-      await this.handle({
-        type: "peer-close",
-        connectionId: z.string().uuid().parse(p.connectionId),
-      });
-    else if (p.type === "mail") {
+      await this.onFrame(e.connectionId, e.frame);
+    } else if (p.type === "peer-close") {
+      this.endSession(z.string().uuid().parse(p.connectionId));
+    } else if (p.type === "mail") {
       if (!this.relayPaired) return;
       await this.receiveMail(p.envelope);
-    } else if (p.type === "accepted")
+    } else if (p.type === "accepted") {
       await this.updateReceipt(
-        z
-          .string()
-          .regex(/^[a-f0-9]{32}$/)
-          .parse(p.messageId),
+        z.string().regex(/^[a-f0-9]{32}$/).parse(p.messageId),
         "SENT",
       );
-    else if (p.type === "rejected")
+    } else if (p.type === "rejected") {
+      this.history = this.history.map((x) =>
+        x.id === p.messageId && !x.delivered ? { ...x, state: "FAILED" } : x,
+      );
       this.publish({
-        messages: this.snapshot.messages.map((x) =>
-          x.id === p.messageId && !x.delivered ? { ...x, state: "FAILED" } : x,
-        ),
+        messages: this.visibleMessages(),
         notice:
-          "Relay queue is full. Your encrypted message remains on this computer and will retry.",
+          "The relay queue is full. Your encrypted message stays on this computer and will retry.",
       });
-    else if (p.type === "error" && p.requestId) {
-      this.requests.delete(p.requestId);
-      if (!this.active)
+    } else if (p.type === "error") {
+      const requestId = typeof p.requestId === "string" ? p.requestId : undefined;
+      if (requestId) this.requests.delete(requestId);
+      if (p.code === "PAIR_NOT_FOUND")
         this.publish({
-          state: "DISCONNECTED",
-          path: this.relayReady ? "INTERNET" : "OFFLINE",
+          joining: false,
+          notice:
+            "That 6-digit code is not valid or has expired. Check it with your friend and try again.",
         });
+      else if (p.code === "PAIR_RATE_LIMITED")
+        this.publish({
+          joining: false,
+          notice: "Too many wrong codes. Wait a minute, then try again.",
+        });
+      else if (p.code === "PEER_OFFLINE")
+        this.publish({
+          state: this.active ? this.snapshot.state : "DISCONNECTED",
+          notice: this.active
+            ? undefined
+            : "Your friend is offline. Messages will be sent when they reconnect.",
+        });
+      else this.publish({ notice: "The relay could not complete that request." });
     }
   }
-  private transmitMail(envelope: Envelope): void {
-    if (!this.relayPaired && !this.active) return;
-    const m = this.snapshot.messages.find(
-      (x) => x.id === envelope.messageId && x.from === "me",
-    );
-    if (
-      m &&
-      !m.delivered &&
-      (!m.state || ["QUEUED", "FAILED"].includes(m.state))
-    )
+  private onPeerOpen(e: {
+    connectionId: string;
+    outbound: boolean;
+    requestId?: string;
+  }): void {
+    if (this.relaySessions.size >= 8) throw Error("Relay link capacity");
+    this.relaySessions.add(e.connectionId);
+    const request = e.requestId ? this.requests.get(e.requestId) : undefined;
+    if (e.requestId) this.requests.delete(e.requestId);
+    const session: Session = {
+      id: e.connectionId,
+      outbound: e.outbound,
+      expected: request?.expected,
+      invitation: request?.invitation,
+      challenge: randomChallenge(),
+      auth: false,
+      ready: false,
+      localVerified: false,
+      remoteVerified: false,
+      opened: Date.now(),
+      lastAuthenticated: Date.now(),
+      controls: new Set(),
+    };
+    this.sessions.set(session.id, session);
+    this.sendFrame(session.id, makeHello(this.unlocked!.identity, session.challenge));
+    if (!this.active) this.publish({ state: "AUTHENTICATING" });
+  }
+  private async onFrame(connectionId: string, frame: Frame): Promise<void> {
+    const session = this.sessions.get(connectionId);
+    if (!session) return;
+    try {
+      if (frame.kind === "hello") return this.onHello(session, frame);
+      await this.onBox(session, frame);
+    } catch {
+      this.drop(session.id);
       this.publish({
-        messages: this.snapshot.messages.map((x) =>
-          x.id === m.id ? { ...x, state: "SENDING" as const } : x,
-        ),
+        notice:
+          "This connection failed cryptographic verification. No message or trust change was accepted.",
       });
-    const session = this.active ? this.sessions.get(this.active) : undefined;
-    if (session && !this.relaySessions.has(session.id)) {
-      this.sendFrame(session.id, envelope);
-      return;
+    }
+  }
+  private reconnectFriend(): void {
+    const friend = this.unlocked?.friend;
+    if (!friend) return;
+    this.connectInternal(friend.public);
+  }
+  private flushRelay(): void {
+    for (const m of this.history
+      .filter((x) => x.from === "me" && !x.delivered && x.wire)
+      .slice(0, 8))
+      this.transmitMail(m.wire!);
+  }
+  private transmitMail(envelope: Envelope): void {
+    if (!this.relayReady) return;
+    const m = this.history.find((x) => x.id === envelope.messageId && x.from === "me");
+    if (m && !m.delivered && (!m.state || ["QUEUED", "FAILED"].includes(m.state))) {
+      this.history = this.history.map((x) =>
+        x.id === m.id ? { ...x, state: "SENDING" as const } : x,
+      );
+      this.publish({ messages: this.visibleMessages() });
     }
     if (this.relayPaired)
       this.relayCommand({
@@ -1198,20 +1140,12 @@ export class ChatEngine {
         pairId: this.unlocked!.friend!.pairId,
       });
   }
-  private flushRelay(): void {
-    for (const m of this.snapshot.messages
-      .filter((x) => x.from === "me" && !x.delivered && x.wire)
-      .slice(0, 8))
-      this.transmitMail(m.wire!);
-  }
   private async updateReceipt(
     id: string,
     state: "SENT" | "DELIVERED" | "READ",
   ): Promise<void> {
     const u = this.unlocked;
-    const m = this.snapshot.messages.find(
-      (x) => x.id === id && x.from === "me",
-    );
+    const m = this.history.find((x) => x.id === id && x.from === "me");
     if (!m) return;
     const rank = {
       QUEUED: 0,
@@ -1225,23 +1159,18 @@ export class ChatEngine {
       return;
     if (this.api.receipt) await this.api.receipt(id, state);
     else if (state !== "SENT") await this.api.delivered(id);
-    if (this.unlocked === u)
-      this.publish({
-        messages: this.snapshot.messages.map((x) =>
-          x.id === id
-            ? { ...x, state, delivered: state === "SENT" ? x.delivered : true }
-            : x,
-        ),
-      });
+    if (this.unlocked !== u) return;
+    this.history = this.history.map((x) =>
+      x.id === id
+        ? { ...x, state, delivered: state === "SENT" ? x.delivered : true }
+        : x,
+    );
+    this.publish({ messages: this.visibleMessages() });
   }
   private async receiveMail(input: unknown): Promise<void> {
     const u = this.unlocked;
     if (!u?.friend?.pairId) return;
-    const { envelope: e, payload: raw } = openEnvelope(
-      u.identity,
-      u.friend.public,
-      input,
-    );
+    const { envelope: e, payload: raw } = openEnvelope(u.identity, u.friend.public, input);
     const p = MailPayload.parse(raw);
     if (p.pairId !== u.friend.pairId) throw Error("Wrong pairing epoch");
     if (p.type === "mail-chat") {
@@ -1261,18 +1190,16 @@ export class ChatEngine {
       );
       if (this.unlocked !== u) return;
       if (inserted) {
-        const highest = this.snapshot.messages.reduce(
+        const highest = this.history.reduce(
           (n, x) => (x.from === "friend" ? Math.max(n, x.sequence ?? 0) : n),
           u.friend.receivedSequence ?? 0,
         );
         u.friend.receivedSequence = Math.max(highest, p.sequence);
         await this.api.saveVault(sealVault(u));
         if (this.unlocked !== u) return;
+        this.history = [...this.history, { ...message, delivered: true }];
         this.publish({
-          messages: [
-            ...this.snapshot.messages,
-            { ...message, delivered: true },
-          ],
+          messages: this.visibleMessages(),
           ...(p.sequence <= highest
             ? {
                 notice:
@@ -1290,10 +1217,7 @@ export class ChatEngine {
         messageId: e.messageId,
       });
   }
-  private sendMailReceipt(
-    messageId: string,
-    state: "DELIVERED" | "READ",
-  ): void {
+  private sendMailReceipt(messageId: string, state: "DELIVERED" | "READ"): void {
     const u = this.unlocked;
     if (!u?.friend?.pairId) return;
     this.transmitMail(
@@ -1305,9 +1229,11 @@ export class ChatEngine {
       }),
     );
   }
+  /** Read receipts are sent only while the screen is unlocked and the window has focus. */
   markRead(): void {
-    if (!this.unlocked?.friend || (!this.relayPaired && !this.active)) return;
-    for (const m of this.snapshot.messages
+    if (!this.unlocked?.friend || this.uiLocked || (!this.relayPaired && !this.active))
+      return;
+    for (const m of this.history
       .filter((x) => x.from === "friend" && x.sequence)
       .slice(-20)) {
       if (Date.now() - (this.readSent.get(m.id) ?? 0) < 30000) continue;
@@ -1320,12 +1246,7 @@ export class ChatEngine {
   private async tick(): Promise<void> {
     if (!this.unlocked || this.transport?.readyState !== 1) return;
     const now = Date.now();
-    if (
-      this.snapshot.network?.relayUrl &&
-      !this.relayReady &&
-      now >= this.relayNext
-    )
-      this.openRelay();
+    if (!this.relayReady && now >= this.relayNext) this.openRelay();
     if (this.relayPaired && now - this.relayPolling > 10000) {
       this.relayPolling = now;
       this.relayCommand({ type: "poll" });
@@ -1340,9 +1261,9 @@ export class ChatEngine {
       )
         this.drop(session.id);
     }
-    if (this.invitation && this.invitation.expires < now) {
+    if (this.invitation && this.invitation.invitation.expires < now) {
       this.cancelPairing();
-      this.publish({ notice: "Invitation expired. Create a new invitation." });
+      this.publish({ notice: "This code expired. Create a new code." });
     }
     const session = this.active ? this.sessions.get(this.active) : undefined;
     if (session) {
@@ -1356,44 +1277,41 @@ export class ChatEngine {
       }
       this.flushPending(session);
     } else if (
+      this.relayReady &&
       this.unlocked.friend &&
-      !this.snapshot.warning &&
       !this.requests.size &&
       !this.sessions.size &&
       now - this.lastConnect > 8000
     ) {
-      const found = this.snapshot.devices.find(
-        (x) => x.nodeId === this.unlocked!.friend!.endpoint.nodeId,
-      );
-      this.connectInternal(
-        found ?? this.unlocked.friend.endpoint,
-        this.unlocked.friend.public,
-      );
+      this.reconnectFriend();
     }
   }
   async clearHistory(): Promise<void> {
     const epoch = this.epoch;
     await this.api.clearHistory();
-    if (this.epoch === epoch)
+    if (this.epoch === epoch) {
+      this.history = [];
       this.publish({
         messages: [],
         notice: "Local conversation deleted. Your friend’s copy is unchanged.",
       });
+    }
   }
   async removeFriend(): Promise<void> {
     if (!this.unlocked) return;
     const u = this.unlocked;
     if (this.relayReady) this.relayCommand({ type: "unpin" });
     this.relayPaired = false;
-    this.command({ type: "disconnect-all" });
-    this.sessions.clear();
-    this.requests.clear();
     this.active = undefined;
     this.candidate = undefined;
-    this.unlocked.friend = undefined;
-    await this.api.saveVault(sealVault(this.unlocked));
+    for (const id of [...this.sessions.keys()]) this.drop(id);
+    this.sessions.clear();
+    this.requests.clear();
+    u.friend = undefined;
+    await this.api.saveVault(sealVault(u));
     await this.api.clearHistory();
     if (this.unlocked !== u) return;
+    this.history = [];
     this.publish({
       friend: undefined,
       pending: undefined,
@@ -1402,7 +1320,7 @@ export class ChatEngine {
       warning: undefined,
       state: "PAIRING_REQUIRED",
       notice:
-        "Trust and local conversation removed. Both devices must verify a new pairing.",
+        "Trust and local conversation removed. Pair again with a new 6-digit code.",
     });
   }
   async resetIdentity(): Promise<void> {
@@ -1411,7 +1329,6 @@ export class ChatEngine {
     this.publish({
       mode: "new",
       state: "PAIRING_REQUIRED",
-      network: { ...this.snapshot.network!, hasVault: false },
     });
   }
   dismissNotice(): void {
