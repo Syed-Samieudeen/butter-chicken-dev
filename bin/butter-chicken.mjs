@@ -10,7 +10,7 @@ if (["--version", "-v", "version"].includes(command)) {
   console.log(`Butter Chicken ${manifest.version}`);
 } else if (["--help", "-h", "help"].includes(command)) {
   console.log(
-    `Butter Chicken ${manifest.version}\n\nUsage: butter-chicken [start|status|--version|--help]\n\nstart       Run the local UI and relay connection in this terminal (default).\nstatus      Check whether the local service is running.\n--version   Show this installed package version.\n--help      Show these commands.\n\nOpen the displayed localhost URL and keep this terminal open. Stop with Ctrl+C.\nData is stored in your OS user-data directory, outside the installation.\nOverride with BC_DATA_DIR (absolute), BC_CONFIG_FILE, BC_UI_PORT, BC_RELAY_URL or BC_CLOUDFLARE_RELAY.`,
+    `Butter Chicken ${manifest.version}\n\nUsage: butter-chicken [start|status|--version|--help]\n\nstart       Run the local UI and relay connection in this terminal (default).\nstatus      Check whether the local service is running.\n--version   Show this installed package version.\n--help      Show these commands.\n\nOpen the displayed localhost URL and keep this terminal open. Stop with Ctrl+C.\nData is stored in your OS user-data directory, outside the installation.\nThe Cloudflare relay is preconfigured; no config file is needed for internet chat.\nOverride with BC_DATA_DIR (absolute), BC_CONFIG_FILE, BC_UI_PORT, BC_RELAY_URL or BC_CLOUDFLARE_RELAY.`,
   );
 } else if (!["start", "status"].includes(command) || process.argv.length > 3) {
   console.error("Unknown command. Run butter-chicken --help.");

@@ -6,7 +6,7 @@ try {
   const config = loadConfiguration(resolve("."), development);
   const app = await createApp({ ...config, development });
   console.log(
-    `Butter Chicken\nLocal UI: http://localhost:${app.uiPort}\nInternet relay: ${config.relayUrl}\nData directory: ${config.dataDirectory}\nConfig file: ${config.configFile}\n\nOpen the local UI in your browser and keep this tab open. Pair with the 6-digit code.\nStop with Ctrl+C.`,
+    `Butter Chicken\nLocal UI: http://localhost:${app.uiPort}\nInternet relay: ${config.relayUrl} (preconfigured)\nData directory: ${config.dataDirectory}\nConfig file: ${config.configFile}\n\nOpen the local UI in your browser and keep this tab open. Pair with the 6-digit code.\nStop with Ctrl+C.`,
   );
   let stopping = false;
   const shutdown = async () => {
