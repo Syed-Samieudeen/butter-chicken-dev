@@ -2,6 +2,7 @@ import sodium from "libsodium-wrappers-sumo";
 import { authInput, pinInput, signed } from "../shared/relay.js";
 import { z } from "zod";
 import {
+  EnvelopeSchema,
   FrameSchema,
   type ConnectionState,
   type Envelope,
@@ -39,6 +40,7 @@ import {
   wipe,
   type ChatMessage,
   type Friend,
+  type Group,
   type Invitation,
   type UnlockedVault,
 } from "./crypto";
@@ -81,6 +83,7 @@ const MailPayload = z.discriminatedUnion("type", [
       text: z.string().min(1).max(8000),
       replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
       replyPreview: z.string().min(1).max(200).optional(),
+      groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
     })
     .strict(),
   z
@@ -128,6 +131,7 @@ const Payload = z.discriminatedUnion("type", [
       text: z.string().min(1).max(8000),
       replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
       replyPreview: z.string().min(1).max(200).optional(),
+      groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
     })
     .strict(),
   z
@@ -165,14 +169,24 @@ export interface PendingPair {
   localVerified: boolean;
   remoteVerified: boolean;
 }
+export type SelectedConversation =
+  | { type: "friend"; id: string }
+  | { type: "group"; id: string };
+
 export interface Snapshot {
   mode: "loading" | "new" | "locked" | "ready";
   /** The screen is locked after inactivity. The relay connection is still active. */
   locked: boolean;
   state: ConnectionState;
   self?: { displayName: string; public: PublicIdentity };
-  friend?: Friend;
+  friends: Friend[];
+  groups: Group[];
+  /** Currently selected conversation (contact or group). */
+  selected?: SelectedConversation;
+  /** Messages for the selected conversation. */
   messages: ChatMessage[];
+  /** Convenience: selected friend when a 1:1 chat is open. */
+  friend?: Friend;
   relayUrl?: string;
   relayConnected?: boolean;
   path?: "INTERNET" | "OFFLINE";
@@ -188,7 +202,7 @@ export interface Snapshot {
 export class ChatEngine {
   private relayUrl = "";
   private relayReady = false;
-  private relayPaired = false;
+  private relayPairedPairs = new Set<string>();
   private relayFailures = 0;
   private relayNext = 0;
   private relaySessions = new Set<string>();
@@ -206,6 +220,7 @@ export class ChatEngine {
   private invitation?: { invitation: Invitation; code?: string };
   private invitationUsed = false;
   private history: ChatMessage[] = [];
+  private selected: SelectedConversation | null = null;
   private uiLocked = false;
   private lastActivity = Date.now();
   private listeners = new Set<() => void>();
@@ -219,6 +234,8 @@ export class ChatEngine {
     mode: "loading",
     locked: false,
     state: "DISCONNECTED",
+    friends: [],
+    groups: [],
     messages: [],
   };
   constructor(readonly api: Backend) {}
@@ -231,7 +248,8 @@ export class ChatEngine {
   private publish(patch: Partial<Snapshot> = {}): void {
     const next = { ...this.snapshot, ...patch };
     if (this.uiLocked) {
-      // Message text and codes stay hidden while the screen is locked. Names and connection state remain for navigation.
+      // Sensitive content stays hidden while the screen is locked.
+      next.self = undefined;
       next.messages = [];
       next.invitation = undefined;
       next.pending = undefined;
@@ -240,8 +258,49 @@ export class ChatEngine {
     this.snapshot = next;
     for (const listener of this.listeners) listener();
   }
+  private friendById(id: string): Friend | undefined {
+    return this.unlocked?.friends.find((f) => f.public.id === id);
+  }
+  private groupById(id: string): Group | undefined {
+    return this.unlocked?.groups.find((g) => g.id === id);
+  }
+  private selectedFriend(): Friend | undefined {
+    return this.selected?.type === "friend"
+      ? this.friendById(this.selected.id)
+      : undefined;
+  }
+  private selectedGroup(): Group | undefined {
+    return this.selected?.type === "group"
+      ? this.groupById(this.selected.id)
+      : undefined;
+  }
+  private conversationMessages(): ChatMessage[] {
+    if (!this.selected) return [];
+    if (this.selected.type === "friend") {
+      const id = this.selected.id;
+      return this.history.filter((m) => m.peerId === id && !m.groupId);
+    }
+    const gid = this.selected.id;
+    const msgs = this.history.filter((m) => m.groupId === gid);
+    const seen = new Set<string>();
+    const out: ChatMessage[] = [];
+    for (const m of msgs) {
+      if (m.from === "me") {
+        const key = `${m.groupId}|${m.sentAt}|${m.text}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+      }
+      out.push(m);
+    }
+    out.sort(
+      (a, b) =>
+        Date.parse(a.receivedAt ?? a.sentAt) -
+        Date.parse(b.receivedAt ?? b.sentAt),
+    );
+    return out;
+  }
   private visibleMessages(): ChatMessage[] {
-    return this.uiLocked ? [] : this.history;
+    return this.uiLocked ? [] : this.conversationMessages();
   }
   private pendingFromCandidate(): PendingPair | undefined {
     const session = this.candidate ? this.sessions.get(this.candidate) : undefined;
@@ -257,16 +316,47 @@ export class ChatEngine {
   private showFullView(): void {
     const u = this.unlocked;
     if (!u) return;
+    const selectedFriend = this.selectedFriend();
     this.publish({
       locked: false,
       self: { displayName: u.identity.displayName, public: u.identity.public },
-      friend: u.friend,
-      messages: this.history,
+      friends: u.friends,
+      groups: u.groups,
+      selected: this.selected ?? undefined,
+      friend: selectedFriend,
+      messages: this.conversationMessages(),
       invitation: this.invitation
         ? { code: this.invitation.code, expires: this.invitation.invitation.expires }
         : undefined,
       pending: this.pendingFromCandidate(),
     });
+  }
+  selectConversation(sel: SelectedConversation): void {
+    this.selected = sel;
+    this.showFullView();
+    if (sel.type === "friend" && !this.active && this.relayReady) {
+      const f = this.friendById(sel.id);
+      if (f) this.connectInternal(f.public);
+    }
+  }
+  private pinAllFriends(): void {
+    const u = this.unlocked;
+    if (!u || !this.relayReady) return;
+    for (const f of u.friends) {
+      if (!f.pairId) continue;
+      this.relayCommand({
+        type: "pin",
+        peer: f.public,
+        pairId: f.pairId,
+        signature: signed(
+          pinInput(u.identity.public, f.public, f.pairId),
+          u.identity.signSecret,
+        ),
+      });
+    }
+  }
+  private isPairPaired(pairId?: string): boolean {
+    return Boolean(pairId && this.relayPairedPairs.has(pairId));
   }
 
   async init(): Promise<void> {
@@ -301,6 +391,8 @@ export class ChatEngine {
                 publicIdentity.signKey
             ) {
               if (payload.friend) validateIdentity(payload.friend.public);
+              const friends = payload.friends ?? (payload.friend ? [payload.friend] : []);
+              for (const f of friends) validateIdentity(f.public);
               this.unlocked = {
                 identity: {
                   public: publicIdentity,
@@ -312,7 +404,8 @@ export class ChatEngine {
                 },
                 key,
                 salt: vault.salt,
-                friend: payload.friend,
+                friends,
+                groups: payload.groups ?? [],
               };
               this.publish({ mode: "ready", relayUrl: this.relayUrl });
               await this.activate();
@@ -407,15 +500,20 @@ export class ChatEngine {
     const u = this.unlocked!;
     const rows = await this.api.history();
     if (this.unlocked !== u) throw new Error("Vault locked");
-    this.history = rows
-      .map((row) => openArchive(u.identity, row))
-      .filter((m) => !u.friend || m.peerId === u.friend.public.id);
+    this.history = rows.map((row) => openArchive(u.identity, row));
     this.uiLocked = false;
     this.lastActivity = Date.now();
+    if (!this.selected) {
+      if (u.friends[0]) this.selected = { type: "friend", id: u.friends[0].public.id };
+      else if (u.groups[0]) this.selected = { type: "group", id: u.groups[0].id };
+    }
     this.publish({
       mode: "ready",
       relayUrl: this.relayUrl,
-      state: u.friend ? "DISCONNECTED" : "PAIRING_REQUIRED",
+      state: u.friends.length ? "DISCONNECTED" : "PAIRING_REQUIRED",
+      friends: u.friends,
+      groups: u.groups,
+      selected: this.selected ?? undefined,
       notice: undefined,
       warning: undefined,
     });
@@ -499,7 +597,7 @@ export class ChatEngine {
   lock(): void {
     this.epoch++;
     this.relayReady = false;
-    this.relayPaired = false;
+    this.relayPairedPairs.clear();
     this.relaySessions.clear();
     this.readSent.clear();
     clearInterval(this.timer);
@@ -513,6 +611,7 @@ export class ChatEngine {
     this.sessions.clear();
     this.requests.clear();
     this.history = [];
+    this.selected = null;
     this.active = undefined;
     this.candidate = undefined;
     this.invitation = undefined;
@@ -522,6 +621,9 @@ export class ChatEngine {
       path: "OFFLINE",
       relayConnected: false,
       self: undefined,
+      friends: [],
+      groups: [],
+      selected: undefined,
       friend: undefined,
       messages: [],
       pending: undefined,
@@ -591,8 +693,8 @@ export class ChatEngine {
   }
   /** Creates a 6-digit pairing code for this identity. The relay stores the signed invitation for ten minutes. */
   async invite(): Promise<void> {
-    if (!this.unlocked || this.unlocked.friend)
-      throw new Error("Remove the existing trusted device before pairing again.");
+    if (!this.unlocked)
+      throw new Error("Unlock your identity first.");
     if (!this.relayReady)
       throw new Error("Connecting to the relay. Try again in a moment.");
     this.cancelPairing();
@@ -611,8 +713,8 @@ export class ChatEngine {
   }
   /** Joins a friend's pairing with the 6-digit code. Trust still needs the safety-code check. */
   async join(code: string): Promise<void> {
-    if (!this.unlocked || this.unlocked.friend)
-      throw new Error("Remove the existing trusted device before pairing again.");
+    if (!this.unlocked)
+      throw new Error("Unlock your identity first.");
     const digits = code.trim();
     if (!/^\d{6}$/.test(digits))
       throw new Error("Enter the 6-digit code from your friend.");
@@ -651,7 +753,7 @@ export class ChatEngine {
       joining: false,
       state: this.active
         ? "CONNECTED"
-        : this.unlocked?.friend
+        : this.unlocked?.friends.length
           ? "DISCONNECTED"
           : "PAIRING_REQUIRED",
     });
@@ -675,7 +777,7 @@ export class ChatEngine {
   }
   private onRelayClosed(): void {
     this.relayReady = false;
-    this.relayPaired = false;
+    this.relayPairedPairs.clear();
     this.relayFailures = Math.min(this.relayFailures + 1, 6);
     this.relayNext =
       Date.now() +
@@ -689,13 +791,14 @@ export class ChatEngine {
     const hello = verifyHello(input);
     if (session.hello || hello.identity.id === this.unlocked!.identity.public.id)
       throw new Error("Unexpected identity");
-    const expected = session.expected ?? this.unlocked!.friend?.public;
+    const knownFriend = this.unlocked!.friends.find((f) => sameIdentity(f.public, hello.identity));
+    const expected = session.expected ?? (session.invitation ? undefined : knownFriend?.public);
     if (expected && !sameIdentity(expected, hello.identity)) {
       if (session.outbound)
         this.publish({
           state: "IDENTITY_CHANGED",
           warning:
-            "The device at this code has a different identity from your trusted friend. Disconnect and verify with your friend before removing the existing pairing.",
+            "The device at this connection has a different identity from your trusted contact. Disconnect and verify before removing the pairing.",
         });
       else
         this.publish({
@@ -704,22 +807,19 @@ export class ChatEngine {
       this.drop(session.id);
       return;
     }
-    if (
-      !this.unlocked!.friend &&
-      !session.invitation &&
-      (!this.invitation ||
-        this.invitationUsed ||
-        this.invitation.invitation.expires < Date.now())
-    ) {
+    const pairingMode =
+      session.invitation ||
+      (this.invitation && !this.invitationUsed && this.invitation.invitation.expires >= Date.now());
+    if (!knownFriend && !session.invitation && !pairingMode) {
       this.publish({
-        notice:
-          "Unknown device ignored. Create a code if you want to pair.",
+        notice: "Unknown device ignored. Create a code if you want to pair.",
       });
       this.drop(session.id);
       return;
     }
     session.hello = hello;
-    if (this.unlocked!.friend || session.invitation) this.sendAuth(session);
+    if (knownFriend || session.invitation) this.sendAuth(session);
+    // If this is an inbound pairing candidate (creator side), wait for their auth with token.
   }
   private sendAuth(session: Session): void {
     const invite = session.invitation;
@@ -736,10 +836,11 @@ export class ChatEngine {
   private async onBox(session: Session, frame: Envelope): Promise<void> {
     const u = this.unlocked!;
     if (!session.hello) throw new Error("Handshake required");
+    const knownFriend = u.friends.find((f) => sameIdentity(f.public, session.hello!.identity));
     const opened = openEnvelope(u.identity, session.hello.identity, frame);
     if (
       this.active === session.id &&
-      u.friend &&
+      knownFriend &&
       MailPayload.safeParse(opened.payload).success
     ) {
       await this.receiveMail(frame);
@@ -759,7 +860,7 @@ export class ChatEngine {
     }
     if (payload.type === "auth") {
       if (session.auth) throw new Error("Repeated authentication");
-      if (!u.friend) {
+      if (!knownFriend) {
         if (session.invitation) {
           if (payload.inviteId !== session.invitation.inviteId || payload.token)
             throw new Error("Unexpected pairing response");
@@ -792,7 +893,7 @@ export class ChatEngine {
     if (!session.auth) throw new Error("Authentication required");
     if (payload.type === "ready") {
       session.ready = true;
-      if (u.friend) await this.connected(session);
+      if (knownFriend) await this.connected(session);
       else {
         if (this.candidate && this.candidate !== session.id)
           throw new Error("Pairing already in progress");
@@ -814,7 +915,7 @@ export class ChatEngine {
       await this.completePair(session);
       return;
     }
-    if (this.active !== session.id || !u.friend)
+    if (this.active !== session.id || !knownFriend)
       throw new Error("Trust required");
     if (payload.type === "chat") {
       if (new TextEncoder().encode(payload.text).length > 32_000)
@@ -829,6 +930,7 @@ export class ChatEngine {
         ...(payload.replyTo && payload.replyPreview
           ? { replyTo: payload.replyTo, replyPreview: payload.replyPreview }
           : {}),
+        ...(payload.groupId ? { groupId: payload.groupId } : {}),
       };
       const inserted = await this.api.receive(
         archiveMessage(u.identity, message.peerId, message, true),
@@ -883,11 +985,11 @@ export class ChatEngine {
     await this.completePair(session);
   }
   private async completePair(session: Session): Promise<void> {
-    if (!session.localVerified || !session.remoteVerified || this.unlocked!.friend)
-      return;
+    if (!session.localVerified || !session.remoteVerified) return;
     const u = this.unlocked!;
+    if (u.friends.some((f) => sameIdentity(f.public, session.hello!.identity))) return;
     const now = new Date().toISOString();
-    u.friend = {
+    const friend: Friend = {
       public: session.hello!.identity,
       displayName: session.remoteName!,
       trustedSince: now,
@@ -895,21 +997,27 @@ export class ChatEngine {
       pairId: session.inviteId,
       lastSeen: now,
     };
+    u.friends = [...u.friends, friend];
     try {
       await this.api.saveVault(sealVault(u));
     } catch (error) {
-      if (this.unlocked === u) u.friend = undefined;
+      if (this.unlocked === u) u.friends = u.friends.filter((f) => f.public.id !== friend.public.id);
       throw error;
     }
     if (this.unlocked !== u || this.sessions.get(session.id) !== session) return;
     this.invitation = undefined;
     this.candidate = undefined;
+    this.selected = { type: "friend", id: friend.public.id };
+    this.pinAllFriends();
     this.publish({
       invitation: undefined,
       pending: undefined,
-      friend: u.friend,
+      friends: u.friends,
+      groups: u.groups,
+      selected: this.selected,
+      friend,
+      messages: this.conversationMessages(),
     });
-    this.pinRelay();
     await this.connected(session);
   }
   private async connected(session: Session): Promise<void> {
@@ -919,14 +1027,16 @@ export class ChatEngine {
       return;
     }
     this.active = session.id;
-    const friend = u.friend!;
-    u.friend = { ...friend, lastSeen: new Date().toISOString() };
+    const peerId = session.hello!.identity.id;
+    const idx = u.friends.findIndex((f) => f.public.id === peerId);
+    if (idx >= 0) u.friends[idx] = { ...u.friends[idx], lastSeen: new Date().toISOString() };
     await this.api.saveVault(sealVault(u));
     if (this.unlocked !== u || this.sessions.get(session.id) !== session) return;
     this.publish({
       state: "CONNECTED",
       path: "INTERNET",
-      friend: u.friend,
+      friends: u.friends,
+      friend: this.selectedFriend(),
       notice: undefined,
       warning: undefined,
     });
@@ -937,29 +1047,82 @@ export class ChatEngine {
     reply?: { id: string; text: string },
   ): Promise<void> {
     const u = this.unlocked;
-    const session = this.active ? this.sessions.get(this.active) : undefined;
     const value = text.trim();
-    if (!u?.friend)
-      throw new Error("Pair with your friend before sending messages.");
-    if (!u.friend.pairId)
-      throw new Error("Pair again with the new 6-digit code to enable messaging.");
+    if (!u) throw new Error("Unlock your identity first.");
     if (!value || value.length > 8000 || new TextEncoder().encode(value).length > 32_000)
       throw new Error("Use 1 to 8000 characters, within 32 KB.");
     const replyTo = reply?.id?.match(/^[a-f0-9]{32}$/) ? reply.id : undefined;
     const replyPreview = replyTo
       ? reply!.text.replace(/\s+/g, " ").trim().slice(0, 200) || undefined
       : undefined;
-    const id = randomId();
     const sentAt = new Date().toISOString();
+
+    if (this.selected?.type === "group") {
+      const group = this.groupById(this.selected.id);
+      if (!group) throw new Error("Select a group to send messages.");
+      const members = group.members
+        .map((id) => this.friendById(id))
+        .filter((f): f is Friend => Boolean(f && f.pairId));
+      if (!members.length)
+        throw new Error("Add paired contacts to this group before sending.");
+      for (const friend of members) {
+        const id = randomId();
+        u.identity.sequence = (u.identity.sequence ?? 0) + 1;
+        const sequence = u.identity.sequence;
+        await this.api.saveVault(sealVault(u));
+        const wire = sealEnvelope(
+          u.identity,
+          friend.public,
+          {
+            type: "mail-chat",
+            pairId: friend.pairId!,
+            sequence,
+            text: value,
+            groupId: group.id,
+            ...(replyTo && replyPreview ? { replyTo, replyPreview } : {}),
+          },
+          id,
+          sentAt,
+        );
+        const message = {
+          id,
+          wire,
+          sequence,
+          peerId: friend.public.id,
+          from: "me" as const,
+          text: value,
+          sentAt,
+          groupId: group.id,
+          ...(replyTo && replyPreview ? { replyTo, replyPreview } : {}),
+        };
+        await this.api.outgoing(
+          archiveMessage(u.identity, message.peerId, message, false),
+        );
+        if (this.unlocked !== u)
+          throw new Error(
+            "The vault locked before sending. The encrypted pending message is retained locally.",
+          );
+        this.history = [...this.history, { ...message, delivered: false }];
+        this.transmitMail(wire);
+      }
+      this.publish({ messages: this.visibleMessages() });
+      return;
+    }
+
+    const friend = this.selectedFriend();
+    if (!friend) throw new Error("Select a contact before sending messages.");
+    if (!friend.pairId)
+      throw new Error("Pair again with a new 6-digit code to enable messaging.");
+    const id = randomId();
     u.identity.sequence = (u.identity.sequence ?? 0) + 1;
     const sequence = u.identity.sequence;
     await this.api.saveVault(sealVault(u));
     const wire = sealEnvelope(
       u.identity,
-      u.friend.public,
+      friend.public,
       {
         type: "mail-chat",
-        pairId: u.friend.pairId,
+        pairId: friend.pairId,
         sequence,
         text: value,
         ...(replyTo && replyPreview ? { replyTo, replyPreview } : {}),
@@ -971,7 +1134,7 @@ export class ChatEngine {
       id,
       wire,
       sequence,
-      peerId: u.friend.public.id,
+      peerId: friend.public.id,
       from: "me" as const,
       text: value,
       sentAt,
@@ -1004,17 +1167,7 @@ export class ChatEngine {
     this.command({ type: "relay-open" });
   }
   private pinRelay(): void {
-    const u = this.unlocked;
-    if (!u || !this.relayReady || !u.friend?.pairId) return;
-    this.relayCommand({
-      type: "pin",
-      peer: u.friend.public,
-      pairId: u.friend.pairId,
-      signature: signed(
-        pinInput(u.identity.public, u.friend.public, u.friend.pairId),
-        u.identity.signSecret,
-      ),
-    });
+    this.pinAllFriends();
   }
   private async handleRelay(raw: unknown): Promise<void> {
     const p = z.object({ type: z.string() }).passthrough().parse(raw) as any;
@@ -1035,11 +1188,14 @@ export class ChatEngine {
     } else if (p.type === "ready") {
       this.relayReady = true;
       this.relayFailures = 0;
+      this.relayPairedPairs.clear();
       this.readSent.clear();
       this.publish({ relayConnected: true, path: this.active ? "INTERNET" : "OFFLINE" });
-      if (!this.unlocked?.friend) this.relayCommand({ type: "unpin" });
-      else this.pinRelay();
-      if (this.unlocked?.friend && !this.active) this.reconnectFriend();
+      if (!this.unlocked?.friends.length) this.relayCommand({ type: "unpin" });
+      else this.pinAllFriends();
+      const sf = this.selectedFriend();
+      if (sf && !this.active) this.connectInternal(sf.public);
+      else if (!this.active && this.unlocked?.friends[0]) this.connectInternal(this.unlocked.friends[0].public);
     } else if (p.type === "pair-code") {
       const code = z.string().regex(/^\d{6}$/).parse(p.code);
       if (this.invitation) this.invitation.code = code;
@@ -1050,9 +1206,10 @@ export class ChatEngine {
     } else if (p.type === "pair-offer") {
       await this.onPairOffer(z.string().max(3000).parse(p.invitation));
     } else if (p.type === "paired") {
-      if (p.pairId !== this.unlocked?.friend?.pairId)
+      const pairId = z.string().regex(/^[a-f0-9]{32}$/).parse(p.pairId);
+      if (!this.unlocked?.friends.some((f) => f.pairId === pairId))
         throw Error("Wrong relay pairing");
-      this.relayPaired = true;
+      this.relayPairedPairs.add(pairId);
       this.flushRelay();
     } else if (p.type === "peer-open") {
       const e = z
@@ -1083,7 +1240,7 @@ export class ChatEngine {
     } else if (p.type === "peer-close") {
       this.endSession(z.string().uuid().parse(p.connectionId));
     } else if (p.type === "mail") {
-      if (!this.relayPaired) return;
+      if (!this.relayPairedPairs.size) return;
       await this.receiveMail(p.envelope);
     } else if (p.type === "accepted") {
       await this.updateReceipt(
@@ -1165,13 +1322,17 @@ export class ChatEngine {
     }
   }
   private reconnectFriend(): void {
-    const friend = this.unlocked?.friend;
-    if (!friend) return;
-    this.connectInternal(friend.public);
+    const f = this.selectedFriend() ?? this.unlocked?.friends[0];
+    if (!f) return;
+    this.connectInternal(f.public);
   }
   private flushRelay(): void {
     for (const m of this.history
-      .filter((x) => x.from === "me" && !x.delivered && x.wire)
+      .filter((x) => {
+        if (x.from !== "me" || x.delivered || !x.wire) return false;
+        const f = this.friendById(x.peerId);
+        return Boolean(f?.pairId && this.isPairPaired(f.pairId));
+      })
       .slice(0, 8))
       this.transmitMail(m.wire!);
   }
@@ -1184,11 +1345,12 @@ export class ChatEngine {
       );
       this.publish({ messages: this.visibleMessages() });
     }
-    if (this.relayPaired)
+    const friend = this.friendById(envelope.recipientId);
+    if (friend?.pairId && this.isPairPaired(friend.pairId))
       this.relayCommand({
         type: "mail",
         envelope,
-        pairId: this.unlocked!.friend!.pairId,
+        pairId: friend.pairId,
       });
   }
   private async updateReceipt(
@@ -1220,16 +1382,24 @@ export class ChatEngine {
   }
   private async receiveMail(input: unknown): Promise<void> {
     const u = this.unlocked;
-    if (!u?.friend?.pairId) return;
-    const { envelope: e, payload: raw } = openEnvelope(u.identity, u.friend.public, input);
+    if (!u) return;
+    let envPeek: Envelope;
+    try {
+      envPeek = EnvelopeSchema.parse(input);
+    } catch {
+      return;
+    }
+    const friend = this.friendById(envPeek.senderId);
+    if (!friend?.pairId) return;
+    const { envelope: e, payload: raw } = openEnvelope(u.identity, friend.public, input);
     const p = MailPayload.parse(raw);
-    if (p.pairId !== u.friend.pairId) throw Error("Wrong pairing epoch");
+    if (p.pairId !== friend.pairId) throw Error("Wrong pairing epoch");
     if (p.type === "mail-chat") {
       if (new TextEncoder().encode(p.text).length > 32000)
         throw Error("Message too large");
       const message = {
         id: e.messageId,
-        peerId: u.friend.public.id,
+        peerId: friend.public.id,
         from: "friend" as const,
         text: p.text,
         sentAt: e.timestamp,
@@ -1238,6 +1408,7 @@ export class ChatEngine {
         ...(p.replyTo && p.replyPreview
           ? { replyTo: p.replyTo, replyPreview: p.replyPreview }
           : {}),
+        ...(p.groupId ? { groupId: p.groupId } : {}),
       };
       const inserted = await this.api.receive(
         archiveMessage(u.identity, message.peerId, message, true),
@@ -1245,16 +1416,19 @@ export class ChatEngine {
       if (this.unlocked !== u) return;
       if (inserted) {
         const highest = this.history.reduce(
-          (n, x) => (x.from === "friend" ? Math.max(n, x.sequence ?? 0) : n),
-          u.friend.receivedSequence ?? 0,
+          (n, x) =>
+            x.from === "friend" && x.peerId === friend.public.id && !x.groupId
+              ? Math.max(n, x.sequence ?? 0)
+              : n,
+          friend.receivedSequence ?? 0,
         );
-        u.friend.receivedSequence = Math.max(highest, p.sequence);
+        if (!p.groupId) friend.receivedSequence = Math.max(highest, p.sequence);
         await this.api.saveVault(sealVault(u));
         if (this.unlocked !== u) return;
         this.history = [...this.history, { ...message, delivered: true }];
         this.publish({
           messages: this.visibleMessages(),
-          ...(p.sequence <= highest
+          ...(!p.groupId && p.sequence <= highest
             ? {
                 notice:
                   "A delayed message arrived out of sequence. Its authenticated sequence is retained.",
@@ -1263,22 +1437,26 @@ export class ChatEngine {
         });
         notifyIncoming();
       }
-      this.sendMailReceipt(e.messageId, "DELIVERED");
+      this.sendMailReceipt(friend, e.messageId, "DELIVERED");
     } else await this.updateReceipt(p.messageId, p.state);
-    if (this.unlocked === u && this.relayPaired)
+    if (this.unlocked === u && this.isPairPaired(friend.pairId))
       this.relayCommand({
         type: "consume",
         senderId: e.senderId,
         messageId: e.messageId,
       });
   }
-  private sendMailReceipt(messageId: string, state: "DELIVERED" | "READ"): void {
+  private sendMailReceipt(
+    friend: Friend,
+    messageId: string,
+    state: "DELIVERED" | "READ",
+  ): void {
     const u = this.unlocked;
-    if (!u?.friend?.pairId) return;
+    if (!u || !friend.pairId) return;
     this.transmitMail(
-      sealEnvelope(u.identity, u.friend.public, {
+      sealEnvelope(u.identity, friend.public, {
         type: "mail-receipt",
-        pairId: u.friend.pairId,
+        pairId: friend.pairId,
         messageId,
         state,
       }),
@@ -1286,13 +1464,23 @@ export class ChatEngine {
   }
   /** Read receipts are sent only while the screen is unlocked and the window has focus. */
   markRead(): void {
-    if (!this.unlocked?.friend || this.uiLocked || (!this.relayPaired && !this.active))
+    if (!this.unlocked || this.uiLocked || (!this.relayPairedPairs.size && !this.active))
       return;
+    const peerId =
+      this.selected?.type === "friend" ? this.selected.id : undefined;
     for (const m of this.history
-      .filter((x) => x.from === "friend" && x.sequence)
+      .filter(
+        (x) =>
+          x.from === "friend" &&
+          x.sequence &&
+          !x.groupId &&
+          (!peerId || x.peerId === peerId),
+      )
       .slice(-20)) {
+      const friend = this.friendById(m.peerId);
+      if (!friend) continue;
       if (Date.now() - (this.readSent.get(m.id) ?? 0) < 30000) continue;
-      this.sendMailReceipt(m.id, "READ");
+      this.sendMailReceipt(friend, m.id, "READ");
       this.readSent.set(m.id, Date.now());
     }
     while (this.readSent.size > 128)
@@ -1302,7 +1490,7 @@ export class ChatEngine {
     if (!this.unlocked || this.transport?.readyState !== 1) return;
     const now = Date.now();
     if (!this.relayReady && now >= this.relayNext) this.openRelay();
-    if (this.relayPaired && now - this.relayPolling > 10000) {
+    if (this.relayPairedPairs.size && now - this.relayPolling > 10000) {
       this.relayPolling = now;
       this.relayCommand({ type: "poll" });
       this.flushRelay();
@@ -1333,7 +1521,7 @@ export class ChatEngine {
       this.flushPending(session);
     } else if (
       this.relayReady &&
-      this.unlocked.friend &&
+      this.unlocked.friends.length &&
       !this.requests.size &&
       !this.sessions.size &&
       now - this.lastConnect > 8000
@@ -1352,30 +1540,42 @@ export class ChatEngine {
       });
     }
   }
-  async removeFriend(): Promise<void> {
+  async removeFriend(peerId?: string): Promise<void> {
     if (!this.unlocked) return;
     const u = this.unlocked;
-    if (this.relayReady) this.relayCommand({ type: "unpin" });
-    this.relayPaired = false;
-    this.active = undefined;
-    this.candidate = undefined;
-    for (const id of [...this.sessions.keys()]) this.drop(id);
-    this.sessions.clear();
-    this.requests.clear();
-    u.friend = undefined;
+    const id = peerId ?? (this.selected?.type === "friend" ? this.selected.id : undefined);
+    if (!id) return;
+    const friend = this.friendById(id);
+    if (friend?.pairId) this.relayPairedPairs.delete(friend.pairId);
+    if (this.relayReady) {
+      try { this.relayCommand({ type: "unpin", peerId: id }); } catch {}
+    }
+    for (const [sid, s] of [...this.sessions.entries()]) {
+      if (s.hello?.identity.id === id || s.expected?.id === id) this.drop(sid);
+    }
+    if (this.active && this.sessions.size === 0) this.active = undefined;
+    u.friends = u.friends.filter((f) => f.public.id !== id);
+    u.groups = u.groups.map((g) => ({ ...g, members: g.members.filter((m) => m !== id) }));
     await this.api.saveVault(sealVault(u));
-    await this.api.clearHistory();
     if (this.unlocked !== u) return;
-    this.history = [];
+    this.history = this.history.filter((m) => m.peerId !== id);
+    if (this.selected?.type === "friend" && this.selected.id === id) {
+      this.selected = u.friends[0]
+        ? { type: "friend", id: u.friends[0].public.id }
+        : u.groups[0]
+          ? { type: "group", id: u.groups[0].id }
+          : null;
+    }
     this.publish({
-      friend: undefined,
-      pending: undefined,
-      invitation: undefined,
-      messages: [],
+      friends: u.friends,
+      groups: u.groups,
+      selected: this.selected ?? undefined,
+      friend: this.selectedFriend(),
+      pending: this.candidate ? this.snapshot.pending : undefined,
+      messages: this.conversationMessages(),
       warning: undefined,
-      state: "PAIRING_REQUIRED",
-      notice:
-        "Trust and local conversation removed. Pair again with a new 6-digit code.",
+      state: u.friends.length ? (this.active ? "CONNECTED" : "DISCONNECTED") : "PAIRING_REQUIRED",
+      notice: "Contact removed from this device.",
     });
   }
   async resetIdentity(): Promise<void> {
@@ -1385,6 +1585,44 @@ export class ChatEngine {
       mode: "new",
       state: "PAIRING_REQUIRED",
     });
+  }
+  async createGroup(name: string, memberIds: string[]): Promise<void> {
+    const u = this.unlocked;
+    if (!u) throw new Error("Unlock your identity first.");
+    const trimmed = name.trim();
+    if (!trimmed || trimmed.length > 60)
+      throw new Error("Use a group name between 1 and 60 characters.");
+    const members = [...new Set(memberIds)].filter((id) =>
+      u.friends.some((f) => f.public.id === id),
+    );
+    if (members.length < 2)
+      throw new Error("Select at least two contacts to create a group (3+ people total).");
+    const group: Group = {
+      id: randomId(),
+      name: trimmed,
+      members,
+      createdAt: new Date().toISOString(),
+    };
+    u.groups = [...u.groups, group];
+    await this.api.saveVault(sealVault(u));
+    if (this.unlocked !== u) return;
+    this.selected = { type: "group", id: group.id };
+    this.showFullView();
+  }
+  async removeGroup(groupId: string): Promise<void> {
+    const u = this.unlocked;
+    if (!u) return;
+    u.groups = u.groups.filter((g) => g.id !== groupId);
+    await this.api.saveVault(sealVault(u));
+    if (this.unlocked !== u) return;
+    if (this.selected?.type === "group" && this.selected.id === groupId) {
+      this.selected = u.friends[0]
+        ? { type: "friend", id: u.friends[0].public.id }
+        : u.groups[0]
+          ? { type: "group", id: u.groups[0].id }
+          : null;
+    }
+    this.showFullView();
   }
   dismissNotice(): void {
     this.publish({ notice: undefined });

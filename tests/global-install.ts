@@ -155,13 +155,13 @@ try {
   live = created.unlocked;
   const peer = createIdentity("Synthetic pinned peer");
   const now = new Date().toISOString();
-  live.friend = {
+  live.friends = [{
     public: peer.public,
     displayName: peer.displayName,
     trustedSince: now,
     verifiedAt: now,
     lastSeen: now,
-  };
+  }];
   const originalId = live.identity.public.id;
   const text = "Encrypted history must survive package reinstall";
   const api = new ClientApi(`http://127.0.0.1:${uiPort}`);
@@ -192,7 +192,7 @@ try {
   await reopened.bootstrap();
   live = await unlockVault(await reopened.vault(), password);
   assert.equal(live.identity.public.id, originalId);
-  assert.equal(live.friend!.public.id, peer.public.id);
+  assert.equal(live.friends[0]!.public.id, peer.public.id);
   assert.equal(
     openArchive(live.identity, (await reopened.history())[0]).text,
     text,

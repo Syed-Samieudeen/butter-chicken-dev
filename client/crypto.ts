@@ -61,9 +61,19 @@ export const FriendSchema = z
   })
   .strict();
 export type Friend = z.infer<typeof FriendSchema>;
+export const GroupSchema = z
+  .object({
+    id: z.string().regex(/^[a-f0-9]{32}$/),
+    name: z.string().min(1).max(60),
+    members: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(50),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+export type Group = z.infer<typeof GroupSchema>;
 export interface UnlockedVault {
   identity: SecretIdentity;
-  friend?: Friend;
+  friends: Friend[];
+  groups: Group[];
   key: Uint8Array;
   salt: string;
 }
@@ -80,6 +90,8 @@ export const PrivatePayloadSchema = z
       })
       .strict(),
     friend: FriendSchema.optional(),
+    friends: z.array(FriendSchema).optional(),
+    groups: z.array(GroupSchema).optional(),
   })
   .strict();
 export const ChatMessageSchema = z
@@ -94,6 +106,7 @@ export const ChatMessageSchema = z
     wire: EnvelopeSchema.optional(),
     replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
     replyPreview: z.string().min(1).max(200).optional(),
+    groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
   })
   .strict();
 export type ChatMessage = z.infer<typeof ChatMessageSchema> & {
@@ -272,7 +285,8 @@ export function sealVault(unlocked: UnlockedVault): Vault {
           archiveKey: base64(i.archiveKey),
           sequence: i.sequence ?? 0,
         },
-        ...(unlocked.friend ? { friend: unlocked.friend } : {}),
+        friends: unlocked.friends,
+        groups: unlocked.groups,
       },
       vaultAAD(unlocked.salt),
     ),
@@ -287,7 +301,13 @@ export async function createVault(
     throw new Error("Choose a passphrase of 12 to 512 characters");
   const salt = base64(sodium.randombytes_buf(16));
   const key = await derive(passphrase, salt);
-  const unlocked: UnlockedVault = { identity: createIdentity(name), key, salt };
+  const unlocked: UnlockedVault = {
+    identity: createIdentity(name),
+    friends: [],
+    groups: [],
+    key,
+    salt,
+  };
   return { unlocked, vault: sealVault(unlocked) };
 }
 export async function unlockVault(
@@ -312,7 +332,11 @@ export async function unlockVault(
         publicIdentity.signKey
     )
       throw new Error("Invalid identity keys");
-    if (payload.friend) validateIdentity(payload.friend.public);
+    const friends = payload.friends ?? (payload.friend ? [payload.friend] : []);
+    for (const f of friends) validateIdentity(f.public);
+    for (const g of payload.groups ?? []) {
+      if (!Array.isArray(g.members)) throw new Error("Invalid group");
+    }
     return {
       identity: {
         public: publicIdentity,
@@ -322,9 +346,10 @@ export async function unlockVault(
         archiveKey,
         sequence: payload.identity.sequence ?? 0,
       },
+      friends,
+      groups: payload.groups ?? [],
       key,
       salt: vault.salt,
-      friend: payload.friend,
     };
   } catch {
     sodium.memzero(key);

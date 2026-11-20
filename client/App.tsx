@@ -25,6 +25,7 @@ import {
   Heart,
   KeyRound,
   LoaderCircle,
+  Users,
 } from "./icons";
 import { ClientApi } from "./api";
 import { ChatEngine, IDLE_LOCK_MS, type Snapshot } from "./engine";
@@ -144,6 +145,7 @@ export default function App() {
   const [fatal, setFatal] = useState("");
   const [confirm, setConfirm] = useState<ConfirmKind>();
   const [toast, setToast] = useState("");
+  const [showGroup, setShowGroup] = useState(false);
   useEffect(() => {
     engine
       .init()
@@ -161,12 +163,12 @@ export default function App() {
   useEffect(() => {
     if (s.pending) pairingStarted.current = true;
     if (s.mode !== "ready") pairingStarted.current = false;
-    if (s.mode === "ready" && s.friend && pairingStarted.current) {
+    if (s.mode === "ready" && pairingStarted.current && !s.pending && !s.invitation && s.friend) {
       pairingStarted.current = false;
       navigate("/thank-you");
-    } else if (s.mode === "ready" && !s.friend && path === "/")
+    } else if (s.mode === "ready" && !s.friends.length && !s.groups.length && path === "/")
       navigate("/pair");
-  }, [s.mode, s.friend?.public.id, s.pending, navigate]);
+  }, [s.mode, s.friend?.public.id, s.friends.length, s.groups.length, s.pending, s.invitation, path, navigate]);
   useEffect(() => {
     if (s.mode !== "ready") return;
     const touch = () => engine.touch();
@@ -237,127 +239,54 @@ export default function App() {
       </nav>
       <aside className="sidebar">
         <div className="wordmark">
-          Butter
-          <br />
-          Chicken<span className="wordmark-dot">.</span>
-          <span className="edition">Private two-person chat</span>
+          Butter<br />Chicken<span className="wordmark-dot">.</span>
+          <span className="edition">Private encrypted chat</span>
         </div>
-        <div className="sidebar-label">
-          <span>Your conversation</span>
-          <LockKeyhole size={14} />
-        </div>
-        {s.friend ? (
-          <button
-            className={`friend-row ${view === "chat" ? "selected" : ""}`}
-            onClick={() => setView("chat")}
-          >
-            <Avatar name={s.friend.displayName} />
-            <span>
-              <strong>{s.friend.displayName}</strong>
-              <small>
-                {connected
-                  ? "Connected now"
-                  : "Last seen " + date(s.friend.lastSeen)}
-              </small>
-            </span>
-            <span className={`presence ${connected ? "online" : ""}`} />
+        <div className="sidebar-label"><span>Conversations</span><LockKeyhole size={14} /></div>
+        {s.friends.map((f) => (
+          <button key={f.public.id} className={`friend-row ${s.selected?.type === 'friend' && s.selected.id === f.public.id ? 'selected' : ''}`} onClick={() => { engine.selectConversation({ type: 'friend', id: f.public.id }); setView('chat'); }}>
+            <Avatar name={f.displayName} />
+            <span><strong>{f.displayName}</strong><small>{f.lastSeen ? 'Last seen ' + date(f.lastSeen) : 'Contact'}</small></span>
+            <span className={`presence ${connected && s.selected?.type === 'friend' && s.selected.id === f.public.id ? 'online' : ''}`} />
           </button>
-        ) : (
-          <button
-            className="friend-row add-friend"
-            onClick={() => setView("pair")}
-          >
-            <span className="add-avatar">
-              <UserPlus size={22} />
-            </span>
-            <span>
-              <strong>Pair with a code</strong>
-              <small>Enter the 6-digit code from your friend.</small>
-            </span>
+        ))}
+        {s.groups.map((g) => (
+          <button key={g.id} className={`friend-row ${s.selected?.type === 'group' && s.selected.id === g.id ? 'selected' : ''}`} onClick={() => { engine.selectConversation({ type: 'group', id: g.id }); setView('chat'); }}>
+            <span className="avatar" aria-hidden="true"><Users size={16} /></span>
+            <span><strong>{g.name}</strong><small>{g.members.length + 1} people</small></span>
           </button>
-        )}
-        <div className="sidebar-note">
-          <ShieldCheck size={18} />
-          <p>
-            Your friend is saved by their identity, not by an address.
-            <br />
-            Your connection stays on through the relay.
-          </p>
-        </div>
-        <div className="sidebar-help">
-          <InternalLink href="/help" navigate={navigate}>
-            Help &amp; setup
-          </InternalLink>
-          <InternalLink href="/privacy" navigate={navigate}>
-            Privacy
-          </InternalLink>
-          <InternalLink href="/terms" navigate={navigate}>
-            Terms
-          </InternalLink>
-        </div>
+        ))}
+        <button className="friend-row add-friend" onClick={() => setView('pair')}><span className="add-avatar"><UserPlus size={22} /></span><span><strong>Add contact</strong><small>Pair with a 6-digit code.</small></span></button>
+        {s.friends.length >= 2 ? <button className="friend-row add-friend" onClick={() => setShowGroup(true)}><span className="add-avatar"><Users size={22} /></span><span><strong>New group</strong><small>Chat with 3+ people.</small></span></button> : null}
+        <div className="sidebar-note"><ShieldCheck size={18} /><p>Contacts are saved by identity.<br />Connections stay on through the relay.</p></div>
+        <div className="sidebar-help"><InternalLink href="/help" navigate={navigate}>Help &amp; setup</InternalLink> <InternalLink href="/privacy" navigate={navigate}>Privacy</InternalLink> <InternalLink href="/terms" navigate={navigate}>Terms</InternalLink></div>
         <div className="sidebar-bottom">
-          <div className="network-card">
-            <div className="network-title">
-              <Wifi size={18} />
-              <strong>Connection</strong>
-            </div>
-            <div className="network-line">
-              <span
-                className={`presence ${s.relayConnected ? "online" : ""}`}
-              />
-              <span>
-                {s.relayUrl
-                  ? s.relayConnected
-                    ? "Relay connected"
-                    : "Reconnecting to relay…"
-                  : "Starting…"}
-              </span>
-            </div>
-            <hr />
-            <span className="network-foot">
-              Relay: Cloudflare
-              <br />
-              {s.friend
-                ? connected
-                  ? "Friend: connected"
-                  : "Friend: waiting"
-                : "No friend paired"}
-            </span>
-          </div>
-          <div className="self-row">
-            <Avatar name={s.self?.displayName} />
-            <span>
-              <strong>{s.self?.displayName ?? "This device"}</strong>
-              <small>
-                {s.mode === "ready"
-                  ? s.locked
-                    ? "Screen locked"
-                    : "Unlocked"
-                  : s.mode === "new"
-                    ? "Create your identity"
-                    : "Vault locked"}
-              </small>
-            </span>
-            <LockKeyhole size={16} />
-          </div>
+          <div className="network-card"><div className="network-title"><Wifi size={18} /><strong>Connection</strong></div><div className="network-line"><span className={`presence ${s.relayConnected ? 'online' : ''}`} /><span>{s.relayUrl ? (s.relayConnected ? 'Relay connected' : 'Reconnecting to relay...') : 'Starting...'}</span></div><hr /><span className="network-foot">Relay: Cloudflare<br />{s.friends.length ? `${s.friends.length} contact(s)` : 'No contacts paired'}</span></div>
+          <div className="self-row"><Avatar name={s.self?.displayName} /><span><strong>{s.self?.displayName ?? 'This device'}</strong><small>{s.mode === 'ready' ? (s.locked ? 'Screen locked' : 'Unlocked') : s.mode === 'new' ? 'Create your identity' : 'Vault locked'}</small></span><LockKeyhole size={16} /></div>
         </div>
       </aside>
       <main className="main-panel">
         <header className="main-header">
           <div className="room-heading">
-            {s.friend ? (
+            {s.selected?.type === "group" ? (
+              <span className="room-icon"><Users size={23} /></span>
+            ) : s.friend ? (
               <Avatar name={s.friend.displayName} />
             ) : (
-              <span className="room-icon">
-                <MessageCircle size={23} />
-              </span>
+              <span className="room-icon"><MessageCircle size={23} /></span>
             )}
             <div>
-              <h1>{s.friend?.displayName ?? "Just you two"}</h1>
+              <h1>
+                {s.selected?.type === "group"
+                  ? (s.groups.find((g) => g.id === s.selected?.id)?.name ?? "Group")
+                  : s.friend?.displayName ?? "Conversations"}
+              </h1>
               <span>
-                {s.friend
-                  ? `${connected ? "Connected" : "Waiting"} · Trusted conversation`
-                  : "A private space for your friend"}
+                {s.selected?.type === "group"
+                  ? `${(s.groups.find((g) => g.id === s.selected?.id)?.members.length ?? 0) + 1} people · encrypted`
+                  : s.friend
+                    ? `${connected ? "Connected" : "Waiting"} · Trusted conversation`
+                    : "Add a contact or create a group"}
               </span>
             </div>
           </div>
@@ -367,11 +296,7 @@ export default function App() {
             disabled={s.mode !== "ready" || s.locked}
           >
             <ShieldCheck size={17} />
-            <span>
-              {s.mode === "ready" && !s.locked
-                ? stateLabels[s.state]
-                : "Encrypted"}
-            </span>
+            <span>{s.mode === "ready" && !s.locked ? stateLabels[s.state] : "Encrypted"}</span>
           </button>
         </header>
         <Breadcrumbs path={path} navigate={navigate} />
@@ -471,8 +396,11 @@ export default function App() {
           {toast}
         </div>
       ) : null}
+      {showGroup ? (
+        <GroupDialog friends={s.friends} onClose={() => setShowGroup(false)} onCreate={async (name, members) => { await engine.createGroup(name, members); setShowGroup(false); setView("chat"); setToast("Group created."); }} />
+      ) : null}
       {confirm ? (
-        <ConfirmDialog kind={confirm} close={() => setConfirm(undefined)} />
+        <ConfirmDialog kind={confirm} close={() => setConfirm(undefined)} selectedPeerId={s.selected?.type === "friend" ? s.selected.id : undefined} />
       ) : null}
     </div>
   );
@@ -738,7 +666,8 @@ function ChatView({
   >();
   const bottom = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const canSend = Boolean(s.friend) && (s.state === "CONNECTED" || Boolean(s.relayConnected));
+  const isGroup = s.selected?.type === "group";
+  const canSend = isGroup ? s.groups.some((g) => g.id === s.selected?.id) : Boolean(s.friend) && (s.state === "CONNECTED" || Boolean(s.relayConnected));
   useEffect(() => {
     if (document.visibilityState === "visible" && document.hasFocus())
       engine.markRead();
@@ -785,8 +714,10 @@ function ChatView({
       <div className="conversation-banner">
         <LockKeyhole size={14} />
         <span>
-          {s.friend
-            ? "Messages are encrypted on this device. They reach your friend through the relay."
+          {isGroup
+            ? "Group messages are encrypted and sent to each member through the relay."
+            : s.friend
+            ? "Messages are encrypted on this device. They reach your contact through the relay."
             : "Your conversation begins with a verified pairing."}
         </span>
         {s.friend ? (
@@ -818,11 +749,11 @@ function ChatView({
                 onDoubleClick={() => startReply(m)}
               >
                 {m.from === "friend" ? (
-                  <Avatar name={s.friend?.displayName} />
+                  <Avatar name={isGroup ? (s.friends.find((f) => f.public.id === m.peerId)?.displayName ?? "Contact") : s.friend?.displayName} />
                 ) : null}
                 <div className="message-bubble">
                   <span className="sr-only">
-                    {m.from === "me" ? "You" : s.friend?.displayName}:{" "}
+                    {m.from === "me" ? "You" : (isGroup ? (s.friends.find((f) => f.public.id === m.peerId)?.displayName ?? "Contact") : s.friend?.displayName)}:{" "}
                   </span>
                   {m.replyTo && m.replyPreview ? (
                     <button
@@ -885,35 +816,22 @@ function ChatView({
           ))
         ) : (
           <div className="chat-empty">
-            <div className="empty-icon">
-              <MessageCircle size={38} />
-            </div>
-            <h2>
-              {s.friend ? "Your first hello starts here" : "A conversation for two"}
-            </h2>
-            <p>
-              {s.friend
-                ? `You’re paired with ${s.friend.displayName}. Messages you send while they are offline wait here, encrypted, and arrive when they reconnect.`
-                : "Pair with a 6-digit code. You’ll both confirm a short security code before a message can be sent."}
-            </p>
-            {!s.friend ? (
-              <button className="button primary" onClick={pair}>
-                <UserPlus size={18} />
-                Pair with a code
-              </button>
-            ) : null}
+            <div className="empty-icon"><MessageCircle size={38} /></div>
+            <h2>{isGroup ? "Start the group conversation" : s.friend ? "Your first hello starts here" : "Start a conversation"}</h2>
+            <p>{isGroup ? "Messages you send are encrypted and delivered to each member of this group." : s.friend ? `You are paired with ${s.friend.displayName}. Messages you send while they are offline wait here, encrypted, and arrive when they reconnect.` : "Add a contact with a 6-digit code, or create a group with 3+ people."}</p>
+            {!s.friend && !isGroup ? (<button className="button primary" onClick={pair}><UserPlus size={18} />Add a contact</button>) : null}
           </div>
         )}
-        <div ref={bottom} />
+                <div ref={bottom} />
       </div>
-            <div className="composer-area">
+                  <div className="composer-area">
         <ActionError message={error} />
         {reply ? (
           <div className="reply-bar" role="status">
             <div className="reply-bar-body">
               <span className="reply-bar-label">
                 Replying to{" "}
-                {reply.from === "me" ? "you" : s.friend?.displayName ?? "friend"}
+                {reply.from === "me" ? "you" : (isGroup ? "contact" : (s.friend?.displayName ?? "contact"))}
               </span>
               <p>{reply.text}</p>
             </div>
@@ -932,15 +850,15 @@ function ChatView({
             ref={inputRef}
             aria-label="Message"
             placeholder={
-              !s.friend
-                ? "Pair with a 6-digit code to start chatting"
+              !s.friend && !isGroup
+                ? "Add a contact or select a conversation to start chatting"
                 : canSend
                   ? "Write a message..."
                   : "Connecting to the relay. Messages are kept and sent when it is ready."
             }
             value={draft}
             maxLength={8000}
-            disabled={!s.friend}
+            disabled={!s.friend && !isGroup}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -954,7 +872,7 @@ function ChatView({
             className="send-button"
             aria-label="Send message"
             onClick={() => void send()}
-            disabled={!s.friend || !draft.trim() || sending}
+            disabled={(!s.friend && !isGroup) || !draft.trim() || sending}
           >
             <Send size={20} />
           </button>
@@ -1005,32 +923,18 @@ function PairView({
     <section className="page-scroll">
       <div className="page-heading">
         <span className="eyebrow">Pair with a code</span>
-        <h2>Connect with your friend</h2>
+        <h2>Add a contact</h2>
         <p>
           One person creates a 6-digit code. The other enters it. Then you both
-          confirm a short security code together.
+          confirm a short security code together. You can pair with multiple contacts.
         </p>
+        {s.friends.length ? (
+          <div className="inline-actions" style={{marginTop: "12px"}}>
+            <button className="button secondary" onClick={chat}>Back to conversations</button>
+          </div>
+        ) : null}
       </div>
-      {s.friend ? (
-        <div className="card paired-card">
-          <div className="card-icon green">
-            <ShieldCheck size={28} />
-          </div>
-          <h3>You’re paired with {s.friend.displayName}</h3>
-          <p>
-            This trusted friend is saved on your device. To pair with someone
-            else, remove the current trust in Security first.
-          </p>
-          <div className="inline-actions">
-            <button className="button primary" onClick={chat}>
-              Open conversation
-            </button>
-            <button className="button secondary" onClick={security}>
-              View security
-            </button>
-          </div>
-        </div>
-      ) : s.pending ? (
+      {s.pending ? (
         <div className="card verification-card">
           <div className="card-icon">
             <ShieldCheck size={28} />
@@ -1236,13 +1140,13 @@ function SecurityView({
                 <dd>{date(s.friend.verifiedAt)}</dd>
               </div>
             </dl>
-            <label className="fingerprint-label">Friend’s identity fingerprint</label>
+            <label className="fingerprint-label">Contact's identity fingerprint</label>
             <p className="fingerprint">{fingerprint(s.friend.public)}</p>
             <p className="field-hint">This is public. Their private key never leaves their device.</p>
             <div className="trust-actions">
               <button className="button danger-button" onClick={remove}>
-                <UserPlus size={17} />
-                Remove trusted device
+                <Trash2 size={17} />
+                Remove this contact
               </button>
               <button className="text-button" onClick={pair}>
                 Pair again
@@ -1268,7 +1172,7 @@ function SecurityView({
           <div className="card-icon">
             <ShieldCheck size={26} />
           </div>
-          <h3>No trusted friend yet</h3>
+          <h3>No trusted contacts yet</h3>
           <p>Pair with a 6-digit code and a security-code check to create trust.</p>
           <button className="button primary" onClick={pair}>
             Pair with a code
@@ -1405,12 +1309,43 @@ function SettingsView({
   );
 }
 
+function GroupDialog({ friends, onClose, onCreate }: { friends: { public: { id: string }; displayName: string }[]; onClose: () => void; onCreate: (name: string, members: string[]) => Promise<void>; }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [name, setName] = useState("");
+  const [selected, setSelected] = useState<string[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  useEffect(() => { ref.current?.showModal(); return () => ref.current?.close(); }, []);
+  const toggle = (id: string) => setSelected((s) => (s.includes(id) ? s.filter((x) => x !== id) : [...s, id]));
+  return (
+    <dialog className="confirm-dialog card" ref={ref} aria-labelledby="group-title" onCancel={(e) => { e.preventDefault(); onClose(); }}>
+      <h3 id="group-title">Create a group</h3>
+      <p>Create a group chat with 3+ people total. Select at least two contacts. For a shared room, all members should pair with each other.</p>
+      <label>Group name<input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} placeholder="e.g. Weekend plans" /></label>
+      <div style={{marginTop: "12px"}}><strong>Members</strong>
+        {friends.map((f) => (
+          <label key={f.public.id} className="checkbox-label" style={{margin: "8px 0"}}>
+            <input type="checkbox" checked={selected.includes(f.public.id)} onChange={() => toggle(f.public.id)} />{f.displayName}
+          </label>
+        ))}
+      </div>
+      <ActionError message={error} />
+      <div className="inline-actions">
+        <button onClick={onClose} disabled={busy}>Cancel</button>
+        <button className="button primary" disabled={busy || !name.trim() || selected.length < 2} onClick={async () => { setBusy(true); setError(""); try { await onCreate(name, selected); } catch (e) { setError(e instanceof Error ? e.message : "Could not create group"); setBusy(false); } }}>{busy ? "Creating..." : "Create group"}</button>
+      </div>
+    </dialog>
+  );
+}
+
 function ConfirmDialog({
   kind,
   close,
+  selectedPeerId,
 }: {
   kind: ConfirmKind;
   close: () => void;
+  selectedPeerId?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [typed, setTyped] = useState("");
@@ -1427,8 +1362,8 @@ function ConfirmDialog({
       "This deletes the encrypted history on this device. Your saved identity and pairing remain. Your friend’s copy is unchanged.",
     ],
     unpair: [
-      "Remove your trusted friend?",
-      "This disconnects your friend and deletes this device’s conversation and saved trust. Your identity stays. Pair again with a new code to chat.",
+      "Remove this contact?",
+      "This removes the contact and deletes this device's conversation with them. Pair again with a new code to chat.",
     ],
     reset: [
       "Reset this device’s identity?",
@@ -1439,7 +1374,7 @@ function ConfirmDialog({
     setBusy(true);
     try {
       if (kind === "reset") await engine.resetIdentity();
-      else if (kind === "unpair") await engine.removeFriend();
+      else if (kind === "unpair") await engine.removeFriend(selectedPeerId);
       else await engine.clearHistory();
       close();
     } catch {

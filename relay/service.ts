@@ -52,14 +52,33 @@ export async function createRelay(options: RelayOptions) {
   }
   const db = new DatabaseSync(options.dataFile);
   if (options.dataFile !== ":memory:") chmodSync(options.dataFile, 0o600);
-  db.exec(`PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;
- CREATE TABLE IF NOT EXISTS pins(owner TEXT PRIMARY KEY,peer TEXT NOT NULL,pair TEXT NOT NULL,json TEXT NOT NULL);
+   db.exec(`PRAGMA journal_mode=DELETE; PRAGMA secure_delete=ON;
+ CREATE TABLE IF NOT EXISTS pins(owner TEXT,peer TEXT NOT NULL,pair TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(owner,peer));
  CREATE TABLE IF NOT EXISTS mail(sender TEXT,recipient TEXT,id TEXT,pair TEXT,json TEXT,expires INTEGER,PRIMARY KEY(sender,id));
- CREATE TABLE IF NOT EXISTS offers(code TEXT PRIMARY KEY,owner TEXT NOT NULL,invitation TEXT NOT NULL,expires INTEGER NOT NULL);`);
+ CREATE TABLE IF NOT EXISTS offers(code TEXT PRIMARY KEY,owner TEXT NOT NULL,invitation TEXT NOT NULL,expires INTEGER NOT NULL);
+ CREATE TABLE IF NOT EXISTS allowances(a TEXT NOT NULL,b TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(a,b));`);
+  // Migrate legacy single-pin schema (owner PRIMARY KEY) to multi-pin (owner,peer).
+  try {
+    const cols = db.prepare("PRAGMA table_info(pins)").all() as Array<{ name: string; pk: number }>;
+    const ownerPk = cols.find((c) => c.name === "owner")?.pk ?? 0;
+    const peerPk = cols.find((c) => c.name === "peer")?.pk ?? 0;
+    if (ownerPk === 1 && peerPk === 0) {
+      db.exec(`BEGIN IMMEDIATE;
+        CREATE TABLE pins_v2(owner TEXT,peer TEXT NOT NULL,pair TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(owner,peer));
+        INSERT OR IGNORE INTO pins_v2(owner,peer,pair,json) SELECT owner,peer,pair,json FROM pins;
+        DROP TABLE pins;
+        ALTER TABLE pins_v2 RENAME TO pins;
+      COMMIT;`);
+    }
+  } catch {
+    try { db.exec("ROLLBACK"); } catch {}
+  }
   const retention = Math.min(options.retentionMs ?? RETENTION_MS, RETENTION_MS);
   const cleanup = () => {
-    db.prepare("DELETE FROM mail WHERE expires<=?").run(Date.now());
-    db.prepare("DELETE FROM offers WHERE expires<=?").run(Date.now());
+    const now = Date.now();
+    db.prepare("DELETE FROM mail WHERE expires<=?").run(now);
+    db.prepare("DELETE FROM offers WHERE expires<=?").run(now);
+    db.prepare("DELETE FROM allowances WHERE expires<=?").run(now);
   };
   cleanup();
   // Failed 6-digit guesses across all connections. Identities are free to create, so the limit is global.
@@ -96,12 +115,26 @@ export async function createRelay(options: RelayOptions) {
       c.ws.send(JSON.stringify(v));
     }
   };
-  const pinned = (id: string) =>
-    db.prepare("SELECT peer,pair,json FROM pins WHERE owner=?").get(id);
+  const pinFor = (owner: string, peer: string) =>
+    db
+      .prepare("SELECT peer,pair,json FROM pins WHERE owner=? AND peer=?")
+      .get(owner, peer);
+  const allPins = (owner: string) =>
+    db.prepare("SELECT peer,pair,json FROM pins WHERE owner=?").all(owner);
   const mutual = (a: string, b: string, pair: string) => {
-    const x = pinned(a),
-      y = pinned(b);
-    return x?.peer === b && y?.peer === a && x.pair === pair && y.pair === pair;
+    const x = pinFor(a, b),
+      y = pinFor(b, a);
+    return x?.pair === pair && y?.pair === pair;
+  };
+  const allowLink = (a: string, b: string) => {
+    cleanup();
+    return Boolean(
+      db
+        .prepare(
+          "SELECT 1 FROM allowances WHERE ((a=? AND b=?) OR (a=? AND b=?)) AND expires>?",
+        )
+        .get(a, b, b, a, Date.now()),
+    );
   };
   const deliver = (c: Client) => {
     cleanup();
@@ -232,14 +265,13 @@ export async function createRelay(options: RelayOptions) {
             !verifySigned(pinInput(own, v.peer, v.pairId), v.signature, own)
           )
             throw Error("Invalid pin");
-          const old = pinned(own.id);
-          if (old && (old.peer !== v.peer.id || old.pair !== v.pairId))
-            throw Error("Unpin first");
+          const old = pinFor(own.id, v.peer.id);
+          if (old && old.pair !== v.pairId) throw Error("Unpin first");
           const count = db.prepare("SELECT COUNT(*) AS n FROM pins").get()!;
           if (!old && Number(count.n) >= 10000)
             throw Error("Registration capacity");
           db.prepare(
-            "INSERT INTO pins VALUES (?,?,?,?) ON CONFLICT(owner) DO UPDATE SET json=excluded.json",
+            "INSERT INTO pins VALUES (?,?,?,?) ON CONFLICT(owner,peer) DO UPDATE SET pair=excluded.pair,json=excluded.json",
           ).run(own.id, v.peer.id, v.pairId, JSON.stringify(v.peer));
           send(c, { type: "pinned" });
           const peer = sessions.get(v.peer.id);
@@ -250,12 +282,34 @@ export async function createRelay(options: RelayOptions) {
           deliver(c);
           if (peer) deliver(peer);
         } else if (v.type === "unpin") {
-          removeLinks(c);
-          db.prepare("DELETE FROM pins WHERE owner=?").run(own.id);
-          db.prepare("DELETE FROM mail WHERE sender=? OR recipient=?").run(
-            own.id,
-            own.id,
-          );
+          if (v.peerId) {
+            for (const [id, l] of links) {
+              if (
+                (l.a === c && l.b.identity?.id === v.peerId) ||
+                (l.b === c && l.a.identity?.id === v.peerId)
+              ) {
+                links.delete(id);
+                send(l.a === c ? l.b : l.a, {
+                  type: "peer-close",
+                  connectionId: id,
+                });
+              }
+            }
+            db.prepare("DELETE FROM pins WHERE owner=? AND peer=?").run(
+              own.id,
+              v.peerId,
+            );
+            db.prepare(
+              "DELETE FROM mail WHERE (sender=? AND recipient=?) OR (sender=? AND recipient=?)",
+            ).run(own.id, v.peerId, v.peerId, own.id);
+          } else {
+            removeLinks(c);
+            db.prepare("DELETE FROM pins WHERE owner=?").run(own.id);
+            db.prepare("DELETE FROM mail WHERE sender=? OR recipient=?").run(
+              own.id,
+              own.id,
+            );
+          }
           send(c, { type: "unpinned" });
         } else if (v.type === "link") {
           const peer = sessions.get(v.peerId);
@@ -272,12 +326,10 @@ export async function createRelay(options: RelayOptions) {
             4
           )
             throw Error("Link limit");
-          const pin = pinned(own.id),
-            other = pinned(v.peerId);
-          if (
-            (pin && pin.peer !== v.peerId) ||
-            (other && other.peer !== own.id)
-          )
+          // Allow linking to a trusted contact or to an actively pairing peer.
+          const pin = pinFor(own.id, v.peerId);
+          const other = pinFor(v.peerId, own.id);
+          if (!pin && !other && !allowLink(own.id, v.peerId))
             throw Error("Not authorized");
           const id = randomUUID();
           links.set(id, { a: c, b: peer });
@@ -298,7 +350,7 @@ export async function createRelay(options: RelayOptions) {
           });
         } else if (v.type === "frame") {
           const l = links.get(v.connectionId);
-          if (!l || (l.a !== c && l.b !== c)) throw Error("Wrong link");
+          if (!l || (l.a !== c && l.b !== c)) return;
           const peer = l.a === c ? l.b : l.a;
           if (v.frame.kind === "hello") {
             if (v.frame.identity.id !== own.id) throw Error("Wrong hello");
@@ -314,7 +366,7 @@ export async function createRelay(options: RelayOptions) {
           });
         } else if (v.type === "drop") {
           const l = links.get(v.connectionId);
-          if (!l || (l.a !== c && l.b !== c)) throw Error("Wrong link");
+          if (!l || (l.a !== c && l.b !== c)) return;
           links.delete(v.connectionId);
           send(l.a === c ? l.b : l.a, {
             type: "peer-close",
@@ -394,6 +446,9 @@ export async function createRelay(options: RelayOptions) {
           }
           // A code is single use: remove it before replying.
           db.prepare("DELETE FROM offers WHERE code=?").run(v.code);
+          db.prepare(
+            "INSERT INTO allowances(a,b,expires) VALUES (?,?,?) ON CONFLICT(a,b) DO UPDATE SET expires=excluded.expires",
+          ).run(String(row.owner), own.id, Date.now() + 120000);
           send(c, { type: "pair-offer", invitation: String(row.invitation) });
         }
       } catch {

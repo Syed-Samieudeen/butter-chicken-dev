@@ -99,6 +99,13 @@ const shapes = {
       <path d="M8 8c0-5 8-5 8 0 0 3-4 2-4 6m0 3v2" />
     </>
   ),
+  Users: (
+    <>
+      <circle cx="8" cy="7" r="3" />
+      <circle cx="16" cy="7" r="3" />
+      <path d="M2 20v-3c0-3 6-3 6 0v3m8 0v-3c0-3 6-3 6 0v3M8 12h8" />
+    </>
+  ),
 };
 type Glyph = keyof typeof shapes;
 const glyph = (name: Glyph) =>
@@ -147,4 +154,5 @@ export const MessageCircle = glyph("MessageCircle"),
   LoaderCircle = glyph("LoaderCircle"),
   ArrowRight = glyph("ArrowRight"),
   ChevronRight = glyph("ChevronRight"),
-  HelpCircle = glyph("HelpCircle");
+  HelpCircle = glyph("HelpCircle"),
+  Users = glyph("Users");

@@ -55,7 +55,12 @@ export const RelayCommand = z.discriminatedUnion("type", [
       signature: Sig,
     })
     .strict(),
-  z.object({ type: z.literal("unpin") }).strict(),
+  z
+    .object({
+      type: z.literal("unpin"),
+      peerId: Id.optional(),
+    })
+    .strict(),
   z
     .object({ type: z.literal("link"), peerId: Id, requestId: MessageId })
     .strict(),
