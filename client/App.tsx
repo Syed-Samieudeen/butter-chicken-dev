@@ -752,7 +752,7 @@ function ChatView({
     };
   }, []);
   useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
+    bottom.current?.scrollIntoView({ block: "end" });
   }, [s.messages.length]);
   const send = async () => {
     if (sending || !draft.trim()) return;
