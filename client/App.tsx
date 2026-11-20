@@ -733,7 +733,11 @@ function ChatView({
   const [draft, setDraft] = useState("");
   const [error, setError] = useState("");
   const [sending, setSending] = useState(false);
+  const [reply, setReply] = useState<
+    { id: string; text: string; from: "me" | "friend" } | undefined
+  >();
   const bottom = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
   const canSend = Boolean(s.friend) && (s.state === "CONNECTED" || Boolean(s.relayConnected));
   useEffect(() => {
     if (document.visibilityState === "visible" && document.hasFocus())
@@ -759,13 +763,22 @@ function ChatView({
     setSending(true);
     setError("");
     try {
-      await engine.sendMessage(draft);
+      await engine.sendMessage(
+        draft,
+        reply ? { id: reply.id, text: reply.text } : undefined,
+      );
       setDraft("");
+      setReply(undefined);
     } catch (e) {
       setError(e instanceof Error ? e.message : "Unable to send");
     } finally {
       setSending(false);
     }
+  };
+  const startReply = (m: (typeof s.messages)[number]) => {
+    setReply({ id: m.id, text: m.text, from: m.from });
+    setError("");
+    requestAnimationFrame(() => inputRef.current?.focus());
   };
   return (
     <div className="chat-view">
@@ -798,7 +811,11 @@ function ChatView({
                   <span>{date(m.receivedAt ?? m.sentAt)}</span>
                 </div>
               ) : null}
-              <div className={`message-row ${m.from === "me" ? "mine" : "theirs"}`}>
+              <div
+                className={`message-row ${m.from === "me" ? "mine" : "theirs"}`}
+                title="Double-click to reply"
+                onDoubleClick={() => startReply(m)}
+              >
                 {m.from === "friend" ? (
                   <Avatar name={s.friend?.displayName} />
                 ) : null}
@@ -806,6 +823,11 @@ function ChatView({
                   <span className="sr-only">
                     {m.from === "me" ? "You" : s.friend?.displayName}:{" "}
                   </span>
+                  {m.replyTo && m.replyPreview ? (
+                    <div className="reply-quote" aria-label="Replying to a message">
+                      <p>{m.replyPreview}</p>
+                    </div>
+                  ) : null}
                   <p>{m.text}</p>
                   <div className="message-meta">
                     <time
@@ -869,16 +891,36 @@ function ChatView({
         )}
         <div ref={bottom} />
       </div>
-      <div className="composer-area">
+            <div className="composer-area">
         <ActionError message={error} />
+        {reply ? (
+          <div className="reply-bar" role="status">
+            <div className="reply-bar-body">
+              <span className="reply-bar-label">
+                Replying to{" "}
+                {reply.from === "me" ? "you" : s.friend?.displayName ?? "friend"}
+              </span>
+              <p>{reply.text}</p>
+            </div>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="Cancel reply"
+              onClick={() => setReply(undefined)}
+            >
+              <X size={16} />
+            </button>
+          </div>
+        ) : null}
         <div className="composer">
           <textarea
+            ref={inputRef}
             aria-label="Message"
             placeholder={
               !s.friend
                 ? "Pair with a 6-digit code to start chatting"
                 : canSend
-                  ? "Write a message…"
+                  ? "Write a message..."
                   : "Connecting to the relay. Messages are kept and sent when it is ready."
             }
             value={draft}

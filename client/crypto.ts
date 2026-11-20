@@ -92,6 +92,8 @@ export const ChatMessageSchema = z
     receivedAt: z.string().datetime().optional(),
     sequence: z.number().int().positive().safe().optional(),
     wire: EnvelopeSchema.optional(),
+    replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+    replyPreview: z.string().min(1).max(200).optional(),
   })
   .strict();
 export type ChatMessage = z.infer<typeof ChatMessageSchema> & {

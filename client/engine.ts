@@ -46,6 +46,32 @@ import {
 /** The screen locks after this much inactivity. Connections stay up while locked. */
 export const IDLE_LOCK_MS = 10 * 60_000;
 
+let audioCtx: AudioContext | undefined;
+function notifyIncoming(): void {
+  try {
+    if (typeof window === "undefined") return;
+    const Ctx =
+      window.AudioContext ||
+      (window as unknown as { webkitAudioContext?: typeof AudioContext })
+        .webkitAudioContext;
+    if (!Ctx) return;
+    audioCtx ??= new Ctx();
+    if (audioCtx.state === "suspended") void audioCtx.resume();
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = "sine";
+    osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.0001, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.06, audioCtx.currentTime + 0.01);
+    gain.gain.exponentialRampToValueAtTime(0.0001, audioCtx.currentTime + 0.22);
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + 0.24);
+  } catch {
+    // Notification sound is best-effort.
+  }
+}
+
 const MailPayload = z.discriminatedUnion("type", [
   z
     .object({
@@ -53,6 +79,8 @@ const MailPayload = z.discriminatedUnion("type", [
       pairId: z.string().regex(/^[a-f0-9]{32}$/),
       sequence: z.number().int().positive().safe(),
       text: z.string().min(1).max(8000),
+      replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+      replyPreview: z.string().min(1).max(200).optional(),
     })
     .strict(),
   z
@@ -98,6 +126,8 @@ const Payload = z.discriminatedUnion("type", [
       ...context,
       type: z.literal("chat"),
       text: z.string().min(1).max(8000),
+      replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+      replyPreview: z.string().min(1).max(200).optional(),
     })
     .strict(),
   z
@@ -796,6 +826,9 @@ export class ChatEngine {
         text: payload.text,
         sentAt: frame.timestamp,
         receivedAt: new Date().toISOString(),
+        ...(payload.replyTo && payload.replyPreview
+          ? { replyTo: payload.replyTo, replyPreview: payload.replyPreview }
+          : {}),
       };
       const inserted = await this.api.receive(
         archiveMessage(u.identity, message.peerId, message, true),
@@ -805,6 +838,7 @@ export class ChatEngine {
       if (inserted) {
         this.history = [...this.history, { ...message, delivered: true }];
         this.publish({ messages: this.visibleMessages() });
+        notifyIncoming();
       }
       // Duplicate retransmissions are acknowledged, but never inserted or displayed twice.
       this.send(session, { type: "ack", messageId: frame.messageId });
@@ -898,7 +932,10 @@ export class ChatEngine {
     });
     this.flushPending(session);
   }
-  async sendMessage(text: string): Promise<void> {
+  async sendMessage(
+    text: string,
+    reply?: { id: string; text: string },
+  ): Promise<void> {
     const u = this.unlocked;
     const session = this.active ? this.sessions.get(this.active) : undefined;
     const value = text.trim();
@@ -908,6 +945,10 @@ export class ChatEngine {
       throw new Error("Pair again with the new 6-digit code to enable messaging.");
     if (!value || value.length > 8000 || new TextEncoder().encode(value).length > 32_000)
       throw new Error("Use 1 to 8000 characters, within 32 KB.");
+    const replyTo = reply?.id?.match(/^[a-f0-9]{32}$/) ? reply.id : undefined;
+    const replyPreview = replyTo
+      ? reply!.text.replace(/\s+/g, " ").trim().slice(0, 200) || undefined
+      : undefined;
     const id = randomId();
     const sentAt = new Date().toISOString();
     u.identity.sequence = (u.identity.sequence ?? 0) + 1;
@@ -916,7 +957,13 @@ export class ChatEngine {
     const wire = sealEnvelope(
       u.identity,
       u.friend.public,
-      { type: "mail-chat", pairId: u.friend.pairId, sequence, text: value },
+      {
+        type: "mail-chat",
+        pairId: u.friend.pairId,
+        sequence,
+        text: value,
+        ...(replyTo && replyPreview ? { replyTo, replyPreview } : {}),
+      },
       id,
       sentAt,
     );
@@ -928,11 +975,15 @@ export class ChatEngine {
       from: "me" as const,
       text: value,
       sentAt,
+      ...(replyTo && replyPreview ? { replyTo, replyPreview } : {}),
     };
     await this.api.outgoing(
       archiveMessage(u.identity, message.peerId, message, false),
     );
-    if (this.unlocked !== u) throw new Error("The vault locked before sending. The encrypted pending message is retained locally.");
+    if (this.unlocked !== u)
+      throw new Error(
+        "The vault locked before sending. The encrypted pending message is retained locally.",
+      );
     this.history = [...this.history, { ...message, delivered: false }];
     this.publish({ messages: this.visibleMessages() });
     this.transmitMail(wire);
@@ -1184,6 +1235,9 @@ export class ChatEngine {
         sentAt: e.timestamp,
         receivedAt: new Date().toISOString(),
         sequence: p.sequence,
+        ...(p.replyTo && p.replyPreview
+          ? { replyTo: p.replyTo, replyPreview: p.replyPreview }
+          : {}),
       };
       const inserted = await this.api.receive(
         archiveMessage(u.identity, message.peerId, message, true),
@@ -1207,6 +1261,7 @@ export class ChatEngine {
               }
             : {}),
         });
+        notifyIncoming();
       }
       this.sendMailReceipt(e.messageId, "DELIVERED");
     } else await this.updateReceipt(p.messageId, p.state);
