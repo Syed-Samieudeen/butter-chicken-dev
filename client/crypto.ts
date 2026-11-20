@@ -20,7 +20,7 @@ import {
 } from "../shared/protocol.js";
 
 export const cryptoReady = sodium.ready;
-const bytes = (value: string, length?: number): Uint8Array => {
+export function bytes(value: string, length?: number): Uint8Array {
   const result = sodium.from_base64(
     value,
     sodium.base64_variants.URLSAFE_NO_PADDING,
@@ -32,8 +32,9 @@ const bytes = (value: string, length?: number): Uint8Array => {
     throw new Error("Invalid byte encoding");
   return result;
 };
-const base64 = (value: Uint8Array): string =>
-  sodium.to_base64(value, sodium.base64_variants.URLSAFE_NO_PADDING);
+export function base64(value: Uint8Array): string {
+  return sodium.to_base64(value, sodium.base64_variants.URLSAFE_NO_PADDING);
+}
 const encode = (value: unknown): Uint8Array =>
   sodium.from_string(JSON.stringify(value));
 const decode = (value: Uint8Array): unknown =>
@@ -70,7 +71,7 @@ export interface UnlockedVault {
   key: Uint8Array;
   salt: string;
 }
-const PrivatePayloadSchema = z
+export const PrivatePayloadSchema = z
   .object({
     identity: z
       .object({
@@ -245,13 +246,15 @@ async function derive(passphrase: string, salt: string): Promise<Uint8Array> {
     worker.postMessage({ passphrase, salt });
   });
 }
-const vaultAAD = (salt: string) => [
-  "ButterChicken/vault/v1",
-  salt,
-  "argon2id13",
-  2,
-  67_108_864,
-];
+export function vaultAAD(salt: string) {
+  return [
+    "ButterChicken/vault/v1",
+    salt,
+    "argon2id13",
+    2,
+    67_108_864,
+  ];
+}
 export function sealVault(unlocked: UnlockedVault): Vault {
   const i = unlocked.identity;
   return {
@@ -571,9 +574,12 @@ export function parseInvitation(code: string, now = Date.now()): Invitation {
   if (!isLocalIPv4(invitation.endpoint.host))
     throw new Error("Invitation requires a literal private LAN IPv4 address");
   bytes(invitation.token, 32);
-  if (invitation.expires < now || invitation.expires > now + 11 * 60_000)
+  const maxClockSkew = 15 * 60_000;
+  if (invitation.expires < now - maxClockSkew)
+    throw new Error("Invitation expired. Create a new one.");
+  if (invitation.expires > now + 11 * 60_000 + maxClockSkew)
     throw new Error(
-      "Invitation expired or device clocks differ. Create a new one.",
+      "Device clocks differ significantly. Adjust system clocks or create a new invitation.",
     );
   if (
     !sodium.crypto_sign_verify_detached(

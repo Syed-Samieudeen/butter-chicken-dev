@@ -1,6 +1,6 @@
 # Setting up Butter Chicken with your friend
 
-Each person needs Node.js 24, a browser and their own copy of the app. For different Wi-Fi/mobile networks, someone first deploys the included relay once using [relay/README.md](../relay/README.md). GitHub stores the source; it does not run the relay. No friend IP, router setting or port forwarding is needed.
+Each person needs Node.js 24, a browser and their own copy of the app. For different Wi-Fi/mobile networks, both computers must use the same internet relay URL. The easiest option is the included Cloudflare Worker relay: deploy [cloudflare/relay/README.md](../cloudflare/relay/README.md) to your Cloudflare account (or use an already-deployed compatible worker) and configure its `wss://.../relay` URL on both computers. You can also self-host the included Node relay using [relay/README.md](../relay/README.md). GitHub stores the source; it does not run the relay. No friend IP, router setting or port forwarding is needed.
 
 ## You: final ZIP
 
@@ -11,13 +11,14 @@ npm install --global ./butter-chicken-1.0.0.tgz
 butter-chicken
 ```
 
-Open your printed localhost URL. Stop with Ctrl+C. Open the printed `config.env` path and add:
+Open your printed localhost URL. Stop with Ctrl+C. Open the printed `config.env` path and add your Cloudflare relay (same URL on both computers):
 
 ```dotenv
-BC_RELAY_URL=wss://YOUR-REAL-RELAY-DOMAIN/relay
+BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev
+# or: BC_RELAY_URL=wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay
 ```
 
-Use the real deployed domain, not this placeholder. Relaunch `butter-chicken`, create/unlock your own identity and check Internet: relay connected. The relay URL is public configuration, not a pairing secret.
+If you use a different deployed relay, replace the host/URL with that relay's real address. Relaunch `butter-chicken`, create/unlock your own identity and check Internet: relay connected. The relay URL is public configuration, not a pairing secret.
 
 ## Your friend: GitHub
 
@@ -32,7 +33,7 @@ npm install --global ./butter-chicken-1.0.0.tgz
 butter-chicken
 ```
 
-Your friend stops the app, adds the **exact same** relay URL to their own printed `config.env`, relaunches, and opens **their own localhost UI**. They create their own identity/passphrase. Never copy the other person's database or keys.
+Your friend stops the app, adds the **exact same** Cloudflare relay setting/URL to their own printed `config.env`, relaunches, and opens **their own localhost UI**. They create their own identity/passphrase. Never copy the other person's database or keys.
 
 If PowerShell rejects the npm `.ps1` shim, use `npm.cmd` and `butter-chicken.cmd`. If the command is not found, see the README's user-prefix/PATH instructions.
 

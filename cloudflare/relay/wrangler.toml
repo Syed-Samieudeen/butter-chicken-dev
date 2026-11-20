@@ -1,0 +1,16 @@
+name = "butterchickenworker"
+main = "src/index.ts"
+compatibility_date = "2026-10-07"
+compatibility_flags = ["nodejs_compat"]
+
+[vars]
+# Canonical public relay URL. Must match the URL clients configure and sign against.
+RELAY_PUBLIC_URL = "wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay"
+
+[[durable_objects.bindings]]
+name = "RELAY"
+class_name = "RelayDurableObject"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RelayDurableObject"]

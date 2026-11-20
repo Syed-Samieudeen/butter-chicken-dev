@@ -49,7 +49,15 @@ test("outgoing delivery survives queries; plaintext cannot enter database API", 
   s.close();
 });
 test("LAN destination policy blocks public endpoints and ambiguous host names", () => {
-  for (const ip of ["192.168.1.2", "10.0.0.2", "172.31.1.3", "127.0.0.1"])
+  for (const ip of [
+    "192.168.1.2",
+    "10.0.0.2",
+    "172.31.1.3",
+    "127.0.0.1",
+    "100.64.0.1",
+    "100.80.149.116",
+    "100.127.255.254",
+  ])
     assert.equal(isLocalIPv4(ip), true);
   for (const ip of [
     "8.8.8.8",
@@ -58,6 +66,10 @@ test("LAN destination policy blocks public endpoints and ambiguous host names", 
     "192.168.1.2.evil.test",
     "::1",
     "0.0.0.0",
+    "100.0.0.1",
+    "100.63.255.255",
+    "100.128.0.1",
+    "100.200.0.1",
   ])
     assert.equal(isLocalIPv4(ip), false);
 });

@@ -1,8 +1,8 @@
 # Connection troubleshooting
 
-## Internet relay first
+## Internet relay / Cloudflare first
 
-For different Wi-Fi/mobile networks, both computers must configure the same real `BC_RELAY_URL=wss://your-domain/relay` and restart. GitHub does not run the relay. Follow [relay deployment/troubleshooting](relay/README.md) and [friend setup](docs/FRIEND_SETUP.md). Internet mode needs outbound WSS, not incoming client ports or router forwarding.
+For different Wi-Fi/mobile networks, both computers must configure the same real relay and restart. The easiest option is a Cloudflare Worker relay: set `BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev` (or `BC_RELAY_URL=wss://.../relay`) on both computers. Deploy/manage the worker with [cloudflare/relay/README.md](cloudflare/relay/README.md), or use the self-hosted Node relay via [relay/README.md](relay/README.md). GitHub does not run the relay. Internet mode needs outbound WSS, not incoming client ports or router forwarding.
 
 Check the relay HTTPS `/health`, canonical public URL, DNS, TLS certificate and configured client URLs. Never disable TLS verification. A 1008 close can indicate wrong proof/audience, duplicate cloned identity session, mismatched old pin/epoch or resource limit. Logs contain event names only. Remove trust on both clients and re-pair once to upgrade a legacy LAN pairing for durable internet delivery.
 

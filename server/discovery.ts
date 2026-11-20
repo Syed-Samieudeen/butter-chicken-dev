@@ -5,13 +5,14 @@ export { isLocalIPv4 } from "../shared/address.js";
 import type { DiscoveryDevice, Endpoint } from "../shared/protocol.js";
 
 export function lanAddresses(): string[] {
-  return Object.values(networkInterfaces()).flatMap((entries) =>
+  const addrs = Object.values(networkInterfaces()).flatMap((entries) =>
     (entries ?? [])
       .filter(
         (x) => x.family === "IPv4" && !x.internal && isLocalIPv4(x.address),
       )
       .map((x) => x.address),
   );
+  return [...new Set(addrs)];
 }
 export function chooseBind(value = "auto"): string {
   if (value === "auto") return lanAddresses()[0] ?? "127.0.0.1";

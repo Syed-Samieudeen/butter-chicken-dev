@@ -32,6 +32,12 @@ import {
   unlockVault,
   verifyHello,
   wipe,
+  vaultAAD,
+  PrivatePayloadSchema,
+  bytes,
+  base64,
+  openLocal,
+  validateIdentity,
   type ChatMessage,
   type Friend,
   type Invitation,
@@ -192,6 +198,49 @@ export class ChatEngine {
   async init(): Promise<void> {
     await cryptoReady;
     const network = await this.api.bootstrap();
+    if (network.hasVault) {
+      try {
+        const sessionKeyB64 = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("bc:v1:sessionKey") : null;
+        const sessionSalt = typeof sessionStorage !== "undefined" ? sessionStorage.getItem("bc:v1:salt") : null;
+        if (sessionKeyB64 && sessionSalt) {
+          const key = bytes(sessionKeyB64);
+          const vault = await this.api.vault();
+          if (vault && vault.salt === sessionSalt) {
+            const payload = PrivatePayloadSchema.parse(
+              openLocal(key, vault.data, vaultAAD(vault.salt)),
+            );
+            const publicIdentity = validateIdentity(payload.identity.public);
+            const boxSecret = bytes(payload.identity.boxSecret, 32);
+            const signSecret = bytes(payload.identity.signSecret, 64);
+            const archiveKey = bytes(payload.identity.archiveKey, 32);
+            if (
+              base64(sodium.crypto_scalarmult_base(boxSecret)) === publicIdentity.boxKey &&
+              base64(sodium.crypto_sign_ed25519_sk_to_pk(signSecret)) === publicIdentity.signKey
+            ) {
+              if (payload.friend) validateIdentity(payload.friend.public);
+              this.unlocked = {
+                identity: {
+                  public: publicIdentity,
+                  displayName: payload.identity.displayName,
+                  boxSecret,
+                  signSecret,
+                  archiveKey,
+                  sequence: payload.identity.sequence ?? 0,
+                },
+                key,
+                salt: vault.salt,
+                friend: payload.friend,
+              };
+              this.publish({ mode: "ready", network });
+              await this.activate();
+              return;
+            }
+          }
+        }
+      } catch {
+        try { sessionStorage.removeItem("bc:v1:sessionKey"); sessionStorage.removeItem("bc:v1:salt"); } catch {}
+      }
+    }
     this.publish({
       mode: network.hasVault ? "locked" : "new",
       state: "PAIRING_REQUIRED",
@@ -218,6 +267,10 @@ export class ChatEngine {
       throw new Error("Session changed. Unlock again.");
     }
     this.unlocked = unlocked;
+    try {
+      sessionStorage.setItem("bc:v1:sessionKey", base64(unlocked.key));
+      sessionStorage.setItem("bc:v1:salt", unlocked.salt);
+    } catch {}
     await this.activate();
   }
   async unlock(passphrase: string): Promise<void> {
@@ -231,6 +284,10 @@ export class ChatEngine {
       throw new Error("Session changed. Unlock again.");
     }
     this.unlocked = unlocked;
+    try {
+      sessionStorage.setItem("bc:v1:sessionKey", base64(unlocked.key));
+      sessionStorage.setItem("bc:v1:salt", unlocked.salt);
+    } catch {}
     try {
       await this.activate();
     } catch (error) {

@@ -54,6 +54,7 @@ export function loadConfiguration(
       "BC_DISCOVERY",
       "BC_DATA_DIR",
       "BC_RELAY_URL",
+      "BC_CLOUDFLARE_RELAY",
     ])
       if (env[key] === undefined && values[key] !== undefined)
         env[key] = values[key];
@@ -65,9 +66,20 @@ export function loadConfiguration(
     throw new Error("BC_DISCOVERY must be true or false");
   const lanHost = env.BC_LAN_HOST || "auto";
   chooseBind(lanHost); // Reject invalid/public host configuration before starting listeners.
-  const relayUrl = env.BC_RELAY_URL
-    ? RelayUrl.parse(env.BC_RELAY_URL)
-    : undefined;
+  let relaySource = env.BC_RELAY_URL;
+  if (!relaySource && env.BC_CLOUDFLARE_RELAY) {
+    const value = env.BC_CLOUDFLARE_RELAY.trim();
+    if (value === "1" || value.toLowerCase() === "true") {
+      relaySource =
+        "wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay";
+    } else if (/^wss?:\/\//i.test(value)) {
+      relaySource = value;
+    } else {
+      const host = value.replace(/^https?:\/\//i, "").replace(/\/+$/, "");
+      relaySource = `wss://${host}${host.endsWith("/relay") ? "" : "/relay"}`;
+    }
+  }
+  const relayUrl = relaySource ? RelayUrl.parse(relaySource) : undefined;
   if (relayUrl?.startsWith("ws:") && !development)
     throw new Error("Production relay requires WSS");
   return {

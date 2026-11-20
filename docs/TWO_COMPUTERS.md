@@ -4,7 +4,7 @@
 
 ## Before starting
 
-Deploy your relay using [relay/README.md](../relay/README.md). From both computers verify `https://YOUR-REAL-DOMAIN/health` shows the relay status. Do not disable TLS validation. Configure exactly `BC_RELAY_URL=wss://YOUR-REAL-DOMAIN/relay` in each app's printed config file. Install Node 24 and the app as in [FRIEND_SETUP.md](FRIEND_SETUP.md).
+Use the same internet relay on both computers. Recommended: deploy/use the Cloudflare Worker relay from [cloudflare/relay/README.md](../cloudflare/relay/README.md), verify `https://butterchickenworker.bakri-downtime-sub.workers.dev/health` (or your worker host) shows relay status, and configure `BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev` or `BC_RELAY_URL=wss://.../relay` in each app's printed config file. Alternatively, deploy the Node relay using [relay/README.md](../relay/README.md). Do not disable TLS validation. Install Node 24 and the app as in [FRIEND_SETUP.md](FRIEND_SETUP.md).
 
 Use synthetic identities/messages for this test. A uses home Wi-Fi. B uses a different Wi-Fi network, or a phone hotspot with Wi-Fi disconnected on the phone so its uplink is mobile data. Verify that B is actually using a different network. No port forwarding, friend IP exchange or client inbound internet firewall opening is needed. The relay host administrator alone configured its inbound TLS ports.
 

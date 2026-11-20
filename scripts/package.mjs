@@ -17,6 +17,7 @@ const allowed = [
   "scripts",
   "public",
   "dist",
+  "cloudflare",
   "README.md",
   "SECURITY.md",
   "THREAT_MODEL.md",
@@ -50,7 +51,7 @@ async function collect(path) {
       (a, b) => a.name.localeCompare(b.name),
     )) {
       if (
-        ["node_modules", ".git", "test-results", ".cache"].includes(
+        ["node_modules", ".git", "test-results", ".cache", ".wrangler"].includes(
           entry.name,
         ) ||
         (entry.name.startsWith(".env") && entry.name !== ".env.example") ||

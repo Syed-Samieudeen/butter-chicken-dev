@@ -18,5 +18,9 @@ coverage/
 config.env
 .env.*
 !.env.example
+.dev.vars
+.wrangler/
+cloudflare/relay/node_modules/
+/package-lock.json
 .DS_Store
 Thumbs.db

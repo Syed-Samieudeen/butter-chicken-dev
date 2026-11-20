@@ -2,7 +2,7 @@
 
 Two people, local encryption, chat over LAN or the internet. Each computer runs `butter-chicken`, opens its own localhost UI, and keeps its own encrypted vault/history. A configured WSS relay lets paired friends use different Wi-Fi networks, ISPs, hotspots, cities or countries. Neither user needs the other's IP, router settings or port forwarding.
 
-**This ZIP implements the relay, but does not provision a hosted relay for you.** Deploy the included service once, then configure its same URL on both computers. No paid messaging API, cloud database, authentication provider or account signup is part of the app. Hosting/domain/network costs depend on your chosen infrastructure. Read [relay deployment and costs](relay/README.md).
+**This release includes relay implementations for both a self-hosted Node relay and a Cloudflare Worker relay.** For easy internet messaging and pairing, deploy the included Cloudflare Worker relay (`cloudflare/relay/`) to your Cloudflare account and configure the same worker URL on both computers (for example `BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev`). You can also deploy the Node relay using [relay deployment and costs](relay/README.md). No paid messaging API, cloud database, authentication provider or account signup is part of the app; hosting/account limits depend on your chosen infrastructure.
 
 This is a new application protocol using established libsodium primitives, not independently certified messaging software. There is no forward secrecy or ratchet. Review [SECURITY.md](SECURITY.md), [THREAT_MODEL.md](THREAT_MODEL.md), [PRIVACY.md](PRIVACY.md) and [SECURITY_AUDIT.md](SECURITY_AUDIT.md).
 
@@ -13,20 +13,21 @@ This is a new application protocol using established libsodium primitives, not i
 - For optional direct LAN chat: private IPv4 routing, TCP 4455 private-network firewall permission, optional UDP 5353 mDNS. Guest network isolation can prevent LAN optimization without preventing relay delivery.
 - An npm global command directory on PATH. This is a CLI + localhost web app, not Electron, Tauri or a native executable.
 
-## Using Butter Chicken From Anywhere
+## Using Butter Chicken From Anywhere (Cloudflare)
 
 1. Install using the ZIP instructions below, then run `butter-chicken`.
 2. Open the printed localhost URL, normally `http://localhost:3000`. Create/unlock your identity using a strong passphrase. Each person creates their own identity; never copy your friend's database.
-3. Deploy the relay once using [relay/README.md](relay/README.md), or use a trusted operator's compatible relay. This release does not supply a public service address.
+3. Deploy the Cloudflare Worker relay once using [cloudflare/relay/README.md](cloudflare/relay/README.md) (it is preconfigured for `butterchickenworker.bakri-downtime-sub.workers.dev`), or use your own deployed compatible Cloudflare/relay URL.
 4. Stop your local app with Ctrl+C. Open the `config.env` location printed by the launcher and add:
 
 ```dotenv
-BC_RELAY_URL=wss://relay.your-domain.example/relay
+BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev
+# or: BC_RELAY_URL=wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay
 ```
 
-Replace the domain with the real deployed hostname. Save the config and relaunch `butter-chicken`. On Windows the default file is `%LOCALAPPDATA%\ButterChicken\config.env`; macOS `~/Library/Application Support/ButterChicken/config.env`; Linux `${XDG_DATA_HOME:-~/.local/share}/butter-chicken/config.env`. The actual printed path is authoritative.
+Use the same relay on both computers. Save the config and relaunch `butter-chicken`. On Windows the default file is `%LOCALAPPDATA%\ButterChicken\config.env`; macOS `~/Library/Application Support/ButterChicken/config.env`; Linux `${XDG_DATA_HOME:-~/.local/share}/butter-chicken/config.env`. The actual printed path is authoritative.
 
-5. Your friend installs from your GitHub using the commands later in this README, configures **exactly the same URL**, and opens **their own localhost UI**. No IP exchange or router configuration is needed.
+5. Your friend installs and runs the app, configures **exactly the same Cloudflare relay setting/URL**, and opens **their own localhost UI**. No IP exchange or router configuration is needed. You can also use the self-hosted Node relay from [relay/README.md](relay/README.md) if preferred.
 6. A chooses **Create invitation** and privately shares the complete BC1 text or QR. It expires after ten minutes and includes the signed relay URL. Both apps must be online/unlocked during initial pairing.
 7. B pastes/scans it and chooses **Connect to friend**. Compare every group of the safety code over an independent trusted call. Both check the comparison box and choose **I verified the code**. One confirmation alone cannot save trust.
 8. Choose **Start chatting**. Send a message in each direction. A stranger's name is never identity verification.
@@ -166,25 +167,30 @@ If migrating an older development copy that used `.data/butter-chicken.sqlite`, 
 
 Copy `.env.example` to the launcher’s printed `config.env` for global use. Development loads the project's `.env`. Actual environment values take precedence. No arbitrary working-directory `.env` is loaded by the global command.
 
-| Variable         | Default                | Purpose                                                                           |
-| ---------------- | ---------------------- | --------------------------------------------------------------------------------- |
-| `BC_RELAY_URL`   | blank                  | WSS internet relay; both friends use the exact same canonical URL ending `/relay` |
-| `BC_UI_PORT`     | 3000                   | Loopback UI/API                                                                   |
-| `BC_LAN_PORT`    | 4455                   | Optional direct LAN transport                                                     |
-| `BC_LAN_HOST`    | auto                   | Private IPv4 interface, otherwise loopback                                        |
-| `BC_DISCOVERY`   | true                   | Local mDNS hints; false disables                                                  |
-| `BC_DATA_DIR`    | OS user-data path      | Absolute private storage path                                                     |
-| `BC_CONFIG_FILE` | user-data `config.env` | Absolute config override                                                          |
+| Variable              | Default                | Purpose                                                                                               |
+| --------------------- | ---------------------- | ----------------------------------------------------------------------------------------------------- |
+| `BC_CLOUDFLARE_RELAY` | blank                  | Cloudflare relay shortcut: host or full WSS URL (use `1` for `bakris-downtime-relay...workers.dev`) |
+| `BC_RELAY_URL`        | blank                  | WSS internet relay; both friends use the exact same canonical URL ending `/relay`                     |
+| `BC_UI_PORT`          | 3000                   | Loopback UI/API                                                                                       |
+| `BC_LAN_PORT`         | 4455                   | Optional direct LAN transport                                                                         |
+| `BC_LAN_HOST`         | auto                   | Private IPv4 interface, otherwise loopback                                                            |
+| `BC_DISCOVERY`        | true                   | Local mDNS hints; false disables                                                                      |
+| `BC_DATA_DIR`         | OS user-data path      | Absolute private storage path                                                                         |
+| `BC_CONFIG_FILE`      | user-data `config.env` | Absolute config override                                                                              |
 
 Production launch rejects `ws://` relay URLs. `npm run dev` permits explicit loopback `ws://127.0.0.1:8787/relay` only. The relay URL never contains user credentials or tokens. Signed invitations do not silently change your relay configuration. No development relay address is hardcoded into production assets.
 
 ## FREE OPTIONS
 
-No per-message API fee or paid dependency is introduced. Existing suitable public infrastructure can host the relay; a qualifying provider free VM may be an option, subject to its live quotas, availability and idle reclamation. Read the dated, source-linked [cost and limits section](relay/README.md#free-options-and-optional-paid-production-options) before provisioning. No always-online free hosted relay is promised.
+No per-message API fee or paid messaging/database dependency is introduced by the app. Internet relay options:
+- **Cloudflare Worker relay (included):** deploy `cloudflare/relay/` to your Cloudflare account and use it for pairing/messaging (subject to Cloudflare account limits/terms). This is the easiest path for "my Cloudflare" setups.
+- **Self-hosted Node relay:** deploy `relay/` on suitable infrastructure (for example a VM with Docker/Caddy). A qualifying provider free VM may be an option, subject to quotas/availability.
+
+Read [cloudflare/relay/README.md](cloudflare/relay/README.md) and [relay/README.md](relay/README.md). No always-online hosted relay is guaranteed by this ZIP alone.
 
 ## OPTIONAL PAID / PRODUCTION OPTIONS
 
-A public Linux VM and domain are sufficient for the included deployment. Confirm the provider's exact VM, IP, disk, bandwidth, tax and renewal quote before purchase. No payment, provider credentials or paid services are configured. Docker/Caddy images use maintained Node 24/Caddy 2 channels; pin reviewed image digests during a controlled rollout. Cloudflare Workers, Firebase, OpenAI APIs, paid databases and message brokers are not used.
+You may use a paid Cloudflare plan/resources for the Worker relay, or a public Linux VM/domain for the Node relay, depending on your needs. Confirm exact provider quotas, limits, taxes, and renewal terms before relying on any service. No payment, provider credentials, OpenAI APIs, Firebase, or managed message broker is configured by this project.
 
 ## Technology Stack & Tools
 

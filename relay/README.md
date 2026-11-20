@@ -1,6 +1,10 @@
 # Butter Chicken relay deployment
 
-This is the implemented Node 24 + ws + native SQLite relay. It shares the existing pinned dependencies. A single process is appropriate for a small private deployment; it is not a horizontally scaled messaging platform. Cloudflare Workers/Durable Objects would require a separate runtime/storage implementation. This release keeps the existing tested Node stack, using a persistent container and Caddy TLS termination instead.
+This directory contains the implemented Node 24 + ws + native SQLite relay. It shares the existing pinned dependencies. A single process is appropriate for a small private deployment; it is not a horizontally scaled messaging platform.
+
+**Cloudflare option:** For easy internet messaging/pairing through Cloudflare, use the included Cloudflare Worker + Durable Object relay in [`../cloudflare/relay/`](../cloudflare/relay/README.md). Deploy it to your Cloudflare account and configure `BC_CLOUDFLARE_RELAY=<your-worker-host>` (or `BC_RELAY_URL=wss://<your-worker-host>/relay`) on both computers.
+
+The Node relay below remains available for self-hosted deployments (for example with Docker + Caddy TLS termination).
 
 ## Production deployment
 
@@ -87,7 +91,7 @@ The relay code, Node, SQLite, ws and Caddy have no per-message API fee. Existing
 
 Oracle's Always Free page, checked 7 October 2026, lists up to two AMD micro instances, or A1 free-tenancy capacity of 1,500 OCPU-hours/9,000 GB-hours monthly (equivalent to 2 OCPUs/12 GB), plus 200 GB combined boot/block storage in the home region. Capacity can be unavailable; idle instances may be reclaimed. Its separate paid-tenancy A1 allowance differs, so check your actual console, avoid paid resources and confirm limits before provisioning. A small two-user deployment may qualify, but there is no uptime or capacity guarantee. Account verification and a domain may still be required. Source: https://docs.oracle.com/en-us/iaas/Content/FreeTier/freetier_topic-Always_Free_Resources.htm .
 
-Optional paid: any suitably sized public Linux VM and a domain. Prices vary by provider/region; there is no paid provider or spend authorization configured here. Obtain the exact monthly quote including public IP, disk, transfer, taxes and domain renewal before purchasing. Neither GitHub Pages nor ordinary ephemeral/serverless HTTP functions host this persistent WebSocket/SQLite service. Cloudflare is not used by this implementation, so its free-tier quotas are not applicable.
+Optional paid: any suitably sized public Linux VM and a domain for the self-hosted Node relay. Prices vary by provider/region; there is no paid provider or spend authorization configured here. Obtain exact quotes before purchasing. Alternatively, the included Cloudflare Worker relay can run on Cloudflare's platform (subject to your account's plan, limits, and terms) - see [`../cloudflare/relay/README.md`](../cloudflare/relay/README.md). Neither GitHub Pages nor ordinary ephemeral/serverless HTTP functions host the Node relay.
 
 TLS reference: https://caddyserver.com/docs/automatic-https . Reverse proxy reference: https://caddyserver.com/docs/reverse-proxy .
 
