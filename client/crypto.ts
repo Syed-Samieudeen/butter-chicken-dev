@@ -67,6 +67,18 @@ export const GroupSchema = z
     name: z.string().min(1).max(60),
     members: z.array(z.string().regex(/^[a-f0-9]{64}$/)).min(1).max(50),
     createdAt: z.string().datetime(),
+    creatorId: z.string().regex(/^[a-f0-9]{64}$/).optional(),
+    memberIds: z
+      .array(z.string().regex(/^[a-f0-9]{64}$/))
+      .min(3)
+      .max(50)
+      .optional(),
+    memberNames: z
+      .record(
+        z.string().regex(/^[a-f0-9]{64}$/),
+        z.string().min(1).max(40),
+      )
+      .optional(),
   })
   .strict();
 export type Group = z.infer<typeof GroupSchema>;
@@ -107,6 +119,8 @@ export const ChatMessageSchema = z
     replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
     replyPreview: z.string().min(1).max(200).optional(),
     groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+    groupMessageId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+    mailKind: z.enum(["chat", "group-invite"]).optional(),
   })
   .strict();
 export type ChatMessage = z.infer<typeof ChatMessageSchema> & {

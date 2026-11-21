@@ -667,7 +667,23 @@ function ChatView({
   const bottom = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const isGroup = s.selected?.type === "group";
-  const canSend = isGroup ? s.groups.some((g) => g.id === s.selected?.id) : Boolean(s.friend) && (s.state === "CONNECTED" || Boolean(s.relayConnected));
+  const activeGroup = isGroup
+    ? s.groups.find((g) => g.id === s.selected?.id)
+    : undefined;
+  const groupPeers =
+    activeGroup?.memberIds?.filter((id) => id !== s.self?.public.id) ??
+    activeGroup?.members ??
+    [];
+  const canSend = isGroup
+    ? Boolean(
+        activeGroup &&
+          groupPeers.length >= 2 &&
+          groupPeers.every((id) =>
+            s.friends.some((f) => f.public.id === id && f.pairId),
+          ),
+      )
+    : Boolean(s.friend) &&
+      (s.state === "CONNECTED" || Boolean(s.relayConnected));
   useEffect(() => {
     if (document.visibilityState === "visible" && document.hasFocus())
       engine.markRead();
@@ -705,7 +721,7 @@ function ChatView({
     }
   };
   const startReply = (m: (typeof s.messages)[number]) => {
-    setReply({ id: m.id, text: m.text, from: m.from });
+    setReply({ id: m.groupMessageId ?? m.id, text: m.text, from: m.from });
     setError("");
     requestAnimationFrame(() => inputRef.current?.focus());
   };
@@ -715,7 +731,9 @@ function ChatView({
         <LockKeyhole size={14} />
         <span>
           {isGroup
-            ? "Group messages are encrypted and sent to each member through the relay."
+            ? canSend
+              ? "Group messages are encrypted and sent to each member through the relay."
+              : "Pair with every group member using the 6-digit code before sending to everyone."
             : s.friend
             ? "Messages are encrypted on this device. They reach your contact through the relay."
             : "Your conversation begins with a verified pairing."}
@@ -743,7 +761,7 @@ function ChatView({
                 </div>
               ) : null}
               <div
-                id={`msg-${m.id}`}
+                id={`msg-${m.groupMessageId ?? m.id}`}
                 className={`message-row ${m.from === "me" ? "mine" : "theirs"}`}
                 title="Double-click to reply"
                 onDoubleClick={() => startReply(m)}
@@ -850,7 +868,9 @@ function ChatView({
             ref={inputRef}
             aria-label="Message"
             placeholder={
-              !s.friend && !isGroup
+              isGroup && !canSend
+                ? "Pair with every group member using a 6-digit code"
+                : !s.friend && !isGroup
                 ? "Add a contact or select a conversation to start chatting"
                 : canSend
                   ? "Write a message..."
@@ -858,7 +878,7 @@ function ChatView({
             }
             value={draft}
             maxLength={8000}
-            disabled={!s.friend && !isGroup}
+            disabled={!canSend}
             onChange={(e) => setDraft(e.target.value)}
             onKeyDown={(e) => {
               if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) {
@@ -872,7 +892,7 @@ function ChatView({
             className="send-button"
             aria-label="Send message"
             onClick={() => void send()}
-            disabled={(!s.friend && !isGroup) || !draft.trim() || sending}
+            disabled={!canSend || !draft.trim() || sending}
           >
             <Send size={20} />
           </button>
@@ -1309,7 +1329,7 @@ function SettingsView({
   );
 }
 
-function GroupDialog({ friends, onClose, onCreate }: { friends: { public: { id: string }; displayName: string }[]; onClose: () => void; onCreate: (name: string, members: string[]) => Promise<void>; }) {
+function GroupDialog({ friends, onClose, onCreate }: { friends: { public: { id: string }; displayName: string; pairId?: string }[]; onClose: () => void; onCreate: (name: string, members: string[]) => Promise<void>; }) {
   const ref = useRef<HTMLDialogElement>(null);
   const [name, setName] = useState("");
   const [selected, setSelected] = useState<string[]>([]);
@@ -1320,12 +1340,12 @@ function GroupDialog({ friends, onClose, onCreate }: { friends: { public: { id: 
   return (
     <dialog className="confirm-dialog card" ref={ref} aria-labelledby="group-title" onCancel={(e) => { e.preventDefault(); onClose(); }}>
       <h3 id="group-title">Create a group</h3>
-      <p>Create a group chat with 3+ people total. Select at least two contacts. For a shared room, all members should pair with each other.</p>
+        <p>Create a group chat with 3+ people total. Select at least two paired contacts. Every member must pair with every other member using the 6-digit code before they can send to everyone. The group is shared with your selected contacts automatically.</p>
       <label>Group name<input value={name} onChange={(e) => setName(e.target.value)} maxLength={60} placeholder="e.g. Weekend plans" /></label>
       <div style={{marginTop: "12px"}}><strong>Members</strong>
         {friends.map((f) => (
           <label key={f.public.id} className="checkbox-label" style={{margin: "8px 0"}}>
-            <input type="checkbox" checked={selected.includes(f.public.id)} onChange={() => toggle(f.public.id)} />{f.displayName}
+            <input type="checkbox" checked={selected.includes(f.public.id)} disabled={!f.pairId} onChange={() => toggle(f.public.id)} />{f.displayName}{!f.pairId ? " (pair again with a 6-digit code first)" : ""}
           </label>
         ))}
       </div>

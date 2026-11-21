@@ -1,6 +1,6 @@
 # Butter Chicken
 
-Two people, local encryption, chat over LAN or the internet. Each computer runs `butter-chicken`, opens its own localhost UI, and keeps its own encrypted vault/history. A configured WSS relay lets paired friends use different Wi-Fi networks, ISPs, hotspots, cities or countries. Neither user needs the other's IP, router settings or port forwarding.
+Pair with multiple people and create group chats for three or more members. Each person runs `butter-chicken`, opens their own localhost UI, and keeps their own encrypted vault/history. A configured WSS relay lets paired contacts use different Wi-Fi networks, ISPs, hotspots, cities or countries. No one needs another member's IP, router settings or port forwarding.
 
 **This release includes relay implementations for both a self-hosted Node relay and a Cloudflare Worker relay.** For easy internet messaging and pairing, deploy the included Cloudflare Worker relay (`cloudflare/relay/`) to your Cloudflare account and configure the same worker URL on both computers (for example `BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev`). You can also deploy the Node relay using [relay deployment and costs](relay/README.md). No paid messaging API, cloud database, authentication provider or account signup is part of the app; hosting/account limits depend on your chosen infrastructure.
 
@@ -28,10 +28,12 @@ BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev
 Use the same relay on both computers. Save the config and relaunch `butter-chicken`. On Windows the default file is `%LOCALAPPDATA%\ButterChicken\config.env`; macOS `~/Library/Application Support/ButterChicken/config.env`; Linux `${XDG_DATA_HOME:-~/.local/share}/butter-chicken/config.env`. The actual printed path is authoritative.
 
 5. Your friend installs and runs the app, configures **exactly the same Cloudflare relay setting/URL**, and opens **their own localhost UI**. No IP exchange or router configuration is needed. You can also use the self-hosted Node relay from [relay/README.md](relay/README.md) if preferred.
-6. A chooses **Create invitation** and privately shares the complete BC1 text or QR. It expires after ten minutes and includes the signed relay URL. Both apps must be online/unlocked during initial pairing.
-7. B pastes/scans it and chooses **Connect to friend**. Compare every group of the safety code over an independent trusted call. Both check the comparison box and choose **I verified the code**. One confirmation alone cannot save trust.
-8. Choose **Start chatting**. Send a message in each direction. A stranger's name is never identity verification.
-9. Future launches reuse the pinned identity. Unlock to receive; sending to an offline friend works when a relay is configured and the pairing has the internet epoch.
+6. A chooses **Add contact → Create a code** and privately shares the six digits. The code expires after ten minutes and works once. Both apps must be online/unlocked during initial pairing.
+7. B chooses **Add contact**, enters the six digits and connects. Compare every group of the safety code over an independent trusted call. Both confirm only if the codes match.
+8. Repeat for each contact. Each person creates their own identity; a contact is not trusted until both devices confirm the safety code.
+9. To create a group of three or more, one person selects **New group** and chooses at least two already-paired contacts. The group invitation is sent encrypted and shares a common group ID and roster.
+10. For every group member to send to everyone, each participant must also pair individually with every other participant using the same six-digit code and safety-code verification. A member who is missing one of those pairings can receive messages but cannot send to the full group until they complete it.
+11. Future launches reuse each pinned identity. Unlock to receive; messages to an offline contact are queued encrypted when a relay is configured.
 
 Legacy LAN-only pairings can still use live LAN chat. Remove trust on **both** clients and pair once after configuring the relay to enable internet offline delivery. An old invitation without a relay URL still needs its reachable LAN endpoint for initial pairing.
 
@@ -43,7 +45,7 @@ Legacy LAN-only pairings can still use live LAN chat. Remove trust on **both** c
 
 The composer displays **COMPOSING** while you type. Outgoing messages show **QUEUED** (saved encrypted locally), **SENDING** (submitted to a usable path), **SENT** (relay accepted temporary ciphertext), **DELIVERED** (friend's authenticated encrypted receipt confirms local save), **READ** (friend's active visible chat UI acknowledged display), or **FAILED** (relay queue rejected the attempt; the local copy remains for retry). READ means displayed by the app, not proof of human attention. LAN delivery can proceed directly from SENDING to DELIVERED without relay SENT.
 
-The relay stores opaque signed envelopes for at most **24 hours**, with deletion on processing/consume or periodic expiry cleanup. Sender retries keep the same envelope and do not extend an existing relay row's expiry. If the relay copy expires, the sender's local pending copy remains and can be resubmitted later. Permanent chat history lives only on the two devices.
+The relay stores opaque signed envelopes for at most **24 hours**, with deletion on processing/consume or periodic expiry cleanup. Group messages are separately encrypted for each paired member; the relay does not receive the group roster or plaintext. Sender retries keep the same envelope and do not extend an existing relay row's expiry. If the relay copy expires, the sender's local pending copy remains and can be resubmitted later. Permanent chat history lives only on each participant's device.
 
 Relay disconnects retry automatically with exponential backoff, jitter and a 60-second cap, checked by a five-second client timer. Wi-Fi/IP changes, relay restart and sleep/resume use fresh authentication. Pending uploads are batched; reconnect restores saved pending envelopes. If the local Node process itself stops, restart it and reload/unlock the local page. Direct LAN listener bindings may need a local service restart after interface changes; internet fallback needs no friend's address.
 

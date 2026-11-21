@@ -11,7 +11,7 @@ Use synthetic identities/messages for this test. A uses home Wi-Fi. B uses a dif
 ## Primary test
 
 1. Launch `butter-chicken` independently on A/B. Open each computer's own localhost URL. Create separate vaults and strong passphrases.
-2. Check relay connected on both. Choose Create invitation on A, privately transfer the text/QR to B, and Connect to friend on B.
+2. Check relay connected on both. A creates a six-digit code and privately shares it with B. B enters the code and connects.
 3. Compare every safety-code group on a trusted call, then both confirm. Confirm both save the same pinned keys and show the real success page.
 4. Start chatting. Verify INTERNET path and live secure friend connection.
 5. A sends a unique synthetic message. B sees exactly one correct message; A obtains DELIVERED. With B's visible active chat focused, verify READ.
@@ -23,6 +23,10 @@ Use synthetic identities/messages for this test. A uses home Wi-Fi. B uses a dif
 11. Change B from mobile hotspot to another Wi-Fi; test a new message, then laptop sleep/wake. Confirm fresh reconnect, identity pin retention and no IP entry.
 12. Inspect the authorized test relay SQLite/structured logs using server administration tools. Confirm no known synthetic plaintext, passphrase, private key or pairing token appears; stored mail is signed ciphertext with routing/expiry metadata. Do not infer this simply from a UI label.
 13. Inspect local history after both service restarts. Delete visible history on B, retry an already delivered test envelope through the isolated regression harness, and confirm its replay tombstone prevents reappearance.
+
+## Group test
+
+Pair at least three test identities with one another using the six-digit code and safety-code checks. One identity creates a group and selects at least two paired contacts. Confirm each selected participant receives the same group ID and roster, then send messages from each member. For each member to send to everyone, every participant must have a pairwise six-digit pairing with every other participant; group messages are encrypted separately for each recipient.
 
 ## Retention, TLS and pairing negatives
 

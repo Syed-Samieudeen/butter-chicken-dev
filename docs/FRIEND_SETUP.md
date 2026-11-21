@@ -39,11 +39,14 @@ If PowerShell rejects the npm `.ps1` shim, use `npm.cmd` and `butter-chicken.cmd
 
 ## Pair once, then chat
 
-1. Both launch/unlock and connect to the relay.
-2. A chooses Create invitation and privately sends the complete BC1 text/QR to B. It expires in ten minutes.
-3. B pastes/scans it, then chooses Connect to friend. Signed invitation relay URL must match configured URL.
+1. Both launch/unlock and connect to the same relay.
+2. A chooses **Add contact → Create a code** and privately sends the six digits to B. The code is single-use and expires in ten minutes.
+3. B chooses **Add contact**, enters the six digits and connects.
 4. Compare **every group** of the safety code on an independent trusted call. Matching display names are insufficient.
-5. Both confirm. Select Start chatting and test both directions.
+5. Both confirm. Repeat for every person who should be a contact.
+6. To create a group, one person selects **New group** and chooses at least two paired contacts. The encrypted group invitation shares one group ID and roster with those contacts.
+7. For every group member to send to everyone, all participants must also pair with one another using the same six-digit flow and safety-code verification. A member without a pairing to every other participant can receive group messages but cannot send to the full group.
+8. Select the group and test messages in both directions.
 
 After pairing, friends may use completely different networks. Unlock/running is required to receive. If B is offline, A's message saves encrypted locally and may show SENT when the relay accepts temporary ciphertext. B reconnects/unlocks and receives it. DELIVERED means local save; READ means visible active chat display, not proof of human attention. Relay ciphertext expires after 24 hours; A's local pending copy remains.
 

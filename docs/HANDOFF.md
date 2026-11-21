@@ -24,7 +24,7 @@ BC_CLOUDFLARE_RELAY=butterchickenworker.bakri-downtime-sub.workers.dev
 # or: BC_RELAY_URL=wss://butterchickenworker.bakri-downtime-sub.workers.dev/relay
 ```
 
-Use exactly the same real domain URL on both computers, restart, then create/unlock separate identities. Privately share one-time BC1 invitation/QR, compare every safety-code group on an independent trusted channel, and both confirm. Future launches use saved pins. [FRIEND_SETUP.md](FRIEND_SETUP.md) includes beginner steps. Legacy pairs must re-pair once for a durable pairing epoch.
+Use exactly the same real domain URL on both computers, restart, then create/unlock separate identities. Pair contacts with the relay-mediated single-use six-digit code, compare every safety-code group on an independent trusted channel, and both confirm. For group chat, pair every member with every other member using that same six-digit flow; then one member creates the group and selects at least two paired contacts. Encrypted group invitations share a common group ID and roster. Future launches use saved pins. [FRIEND_SETUP.md](FRIEND_SETUP.md) includes beginner steps. Legacy pairs must re-pair once for a durable pairing epoch.
 
 LOCAL uses authenticated direct LAN; INTERNET uses WSS relay; OFFLINE retains encrypted local pending copies. Messages progress through QUEUED/SENDING/SENT/DELIVERED/READ or FAILED with retained retry. COMPOSING is a local composer state. Relay SENT is not delivery. READ means active visible chat displayed the message, not human attention. Offline ciphertext lasts at most 24 hours plus cleanup scheduling; sender local pending survives longer. Reconnect uses exponential backoff/jitter capped at 60 seconds. Local service shutdown requires restart/reload/unlock.
 

@@ -84,6 +84,29 @@ const MailPayload = z.discriminatedUnion("type", [
       replyTo: z.string().regex(/^[a-f0-9]{32}$/).optional(),
       replyPreview: z.string().min(1).max(200).optional(),
       groupId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+      groupMessageId: z.string().regex(/^[a-f0-9]{32}$/).optional(),
+    })
+    .strict(),
+  z
+    .object({
+      type: z.literal("mail-group-invite"),
+      pairId: z.string().regex(/^[a-f0-9]{32}$/),
+      group: z
+        .object({
+          id: z.string().regex(/^[a-f0-9]{32}$/),
+          name: z.string().min(1).max(60),
+          creatorId: z.string().regex(/^[a-f0-9]{64}$/),
+          memberIds: z
+            .array(z.string().regex(/^[a-f0-9]{64}$/))
+            .min(3)
+            .max(50),
+          memberNames: z.record(
+            z.string().regex(/^[a-f0-9]{64}$/),
+            z.string().min(1).max(40),
+          ),
+          createdAt: z.string().datetime(),
+        })
+        .strict(),
     })
     .strict(),
   z
@@ -274,6 +297,20 @@ export class ChatEngine {
       ? this.groupById(this.selected.id)
       : undefined;
   }
+  private groupMemberIds(group: Group): string[] {
+    return (
+      group.memberIds ??
+      (this.unlocked
+        ? [this.unlocked.identity.public.id, ...group.members]
+        : group.members)
+    );
+  }
+  private missingGroupContacts(group: Group): string[] {
+    const selfId = this.unlocked?.identity.public.id;
+    return this.groupMemberIds(group).filter(
+      (id) => id !== selfId && !this.friendById(id)?.pairId,
+    );
+  }
   private conversationMessages(): ChatMessage[] {
     if (!this.selected) return [];
     if (this.selected.type === "friend") {
@@ -281,12 +318,14 @@ export class ChatEngine {
       return this.history.filter((m) => m.peerId === id && !m.groupId);
     }
     const gid = this.selected.id;
-    const msgs = this.history.filter((m) => m.groupId === gid);
+    const msgs = this.history.filter(
+      (m) => m.groupId === gid && m.mailKind !== "group-invite",
+    );
     const seen = new Set<string>();
     const out: ChatMessage[] = [];
     for (const m of msgs) {
       if (m.from === "me") {
-        const key = `${m.groupId}|${m.sentAt}|${m.text}`;
+        const key = m.groupMessageId ?? m.id;
         if (seen.has(key)) continue;
         seen.add(key);
       }
@@ -1060,11 +1099,18 @@ export class ChatEngine {
     if (this.selected?.type === "group") {
       const group = this.groupById(this.selected.id);
       if (!group) throw new Error("Select a group to send messages.");
-      const members = group.members
-        .map((id) => this.friendById(id))
-        .filter((f): f is Friend => Boolean(f && f.pairId));
-      if (!members.length)
-        throw new Error("Add paired contacts to this group before sending.");
+      const missing = this.missingGroupContacts(group);
+      if (missing.length)
+        throw new Error(
+          "Pair with every group member using the 6-digit pairing flow before sending to everyone.",
+        );
+      const selfId = u.identity.public.id;
+      const members = this.groupMemberIds(group)
+        .filter((id) => id !== selfId)
+        .map((id) => this.friendById(id)!);
+      if (members.length < 2)
+        throw new Error("A group needs at least two other paired contacts.");
+      const groupMessageId = randomId();
       for (const friend of members) {
         const id = randomId();
         u.identity.sequence = (u.identity.sequence ?? 0) + 1;
@@ -1079,6 +1125,7 @@ export class ChatEngine {
             sequence,
             text: value,
             groupId: group.id,
+            groupMessageId,
             ...(replyTo && replyPreview ? { replyTo, replyPreview } : {}),
           },
           id,
@@ -1093,6 +1140,7 @@ export class ChatEngine {
           text: value,
           sentAt,
           groupId: group.id,
+          groupMessageId,
           ...(replyTo && replyPreview ? { replyTo, replyPreview } : {}),
         };
         await this.api.outgoing(
@@ -1394,9 +1442,99 @@ export class ChatEngine {
     const { envelope: e, payload: raw } = openEnvelope(u.identity, friend.public, input);
     const p = MailPayload.parse(raw);
     if (p.pairId !== friend.pairId) throw Error("Wrong pairing epoch");
-    if (p.type === "mail-chat") {
+    if (p.type === "mail-group-invite") {
+      const selfId = u.identity.public.id;
+      const shared = p.group;
+      const uniqueMembers = new Set(shared.memberIds);
+      if (
+        shared.creatorId !== friend.public.id ||
+        !uniqueMembers.has(selfId) ||
+        !uniqueMembers.has(friend.public.id) ||
+        uniqueMembers.size !== shared.memberIds.length ||
+        Object.keys(shared.memberNames).length !== shared.memberIds.length ||
+        Object.keys(shared.memberNames).some((id) => !uniqueMembers.has(id)) ||
+        shared.memberIds.some((id) => !shared.memberNames[id])
+      )
+        throw Error("Invalid group invitation");
+
+      const localGroup: Group = {
+        id: shared.id,
+        name: shared.name,
+        createdAt: shared.createdAt,
+        creatorId: shared.creatorId,
+        memberIds: shared.memberIds,
+        memberNames: shared.memberNames,
+        members: shared.memberIds.filter((id) => id !== selfId),
+      };
+      const existing = this.groupById(shared.id);
+      if (existing) {
+        const existingMembers =
+          existing.memberIds ??
+          [selfId, ...existing.members];
+        if (
+          existing.creatorId !== shared.creatorId ||
+          existing.name !== shared.name ||
+          existingMembers.length !== shared.memberIds.length ||
+          existingMembers.some((id, index) => id !== shared.memberIds[index])
+        )
+          throw Error("Conflicting group invitation");
+      } else {
+        u.groups = [...u.groups, localGroup];
+        try {
+          // Persist membership before consuming the invitation. A retry is idempotent.
+          await this.api.saveVault(sealVault(u));
+        } catch (error) {
+          if (this.unlocked === u)
+            u.groups = u.groups.filter((g) => g.id !== shared.id);
+          throw error;
+        }
+        if (this.unlocked !== u) return;
+      }
+      const invitationMessage = {
+        id: e.messageId,
+        peerId: friend.public.id,
+        from: "friend" as const,
+        text: "Group invitation",
+        sentAt: e.timestamp,
+        receivedAt: new Date().toISOString(),
+        groupId: shared.id,
+        mailKind: "group-invite" as const,
+      };
+      const inserted = await this.api.receive(
+        archiveMessage(u.identity, friend.public.id, invitationMessage, true),
+      );
+      if (this.unlocked !== u) return;
+      if (inserted)
+        this.history = [...this.history, { ...invitationMessage, delivered: true }];
+      this.publish({
+        groups: u.groups,
+        messages: this.visibleMessages(),
+        ...(!existing ? { notice: `You joined “${shared.name}”.` } : {}),
+      });
+      this.sendMailReceipt(friend, e.messageId, "DELIVERED");
+    } else if (p.type === "mail-chat") {
       if (new TextEncoder().encode(p.text).length > 32000)
         throw Error("Message too large");
+      if (p.groupId) {
+        const group = this.groupById(p.groupId);
+        const roster = group ? this.groupMemberIds(group) : [];
+        if (
+          !p.groupMessageId ||
+          !roster.includes(friend.public.id) ||
+          !roster.includes(u.identity.public.id)
+        ) {
+          // Unknown or non-member group traffic is not displayed or retained.
+          if (this.isPairPaired(friend.pairId))
+            this.relayCommand({
+              type: "consume",
+              senderId: e.senderId,
+              messageId: e.messageId,
+            });
+          return;
+        }
+      } else if (p.groupMessageId) {
+        throw Error("Group message ID without a group");
+      }
       const message = {
         id: e.messageId,
         peerId: friend.public.id,
@@ -1409,6 +1547,7 @@ export class ChatEngine {
           ? { replyTo: p.replyTo, replyPreview: p.replyPreview }
           : {}),
         ...(p.groupId ? { groupId: p.groupId } : {}),
+        ...(p.groupMessageId ? { groupMessageId: p.groupMessageId } : {}),
       };
       const inserted = await this.api.receive(
         archiveMessage(u.identity, message.peerId, message, true),
@@ -1417,18 +1556,18 @@ export class ChatEngine {
       if (inserted) {
         const highest = this.history.reduce(
           (n, x) =>
-            x.from === "friend" && x.peerId === friend.public.id && !x.groupId
+            x.from === "friend" && x.peerId === friend.public.id
               ? Math.max(n, x.sequence ?? 0)
               : n,
           friend.receivedSequence ?? 0,
         );
-        if (!p.groupId) friend.receivedSequence = Math.max(highest, p.sequence);
+        friend.receivedSequence = Math.max(highest, p.sequence);
         await this.api.saveVault(sealVault(u));
         if (this.unlocked !== u) return;
         this.history = [...this.history, { ...message, delivered: true }];
         this.publish({
           messages: this.visibleMessages(),
-          ...(!p.groupId && p.sequence <= highest
+          ...(p.sequence <= highest
             ? {
                 notice:
                   "A delayed message arrived out of sequence. Its authenticated sequence is retained.",
@@ -1466,15 +1605,16 @@ export class ChatEngine {
   markRead(): void {
     if (!this.unlocked || this.uiLocked || (!this.relayPairedPairs.size && !this.active))
       return;
-    const peerId =
-      this.selected?.type === "friend" ? this.selected.id : undefined;
+    const selected = this.selected;
+    if (!selected) return;
     for (const m of this.history
       .filter(
         (x) =>
           x.from === "friend" &&
           x.sequence &&
-          !x.groupId &&
-          (!peerId || x.peerId === peerId),
+          (selected.type === "friend"
+            ? !x.groupId && x.peerId === selected.id
+            : x.groupId === selected.id),
       )
       .slice(-20)) {
       const friend = this.friendById(m.peerId);
@@ -1555,7 +1695,23 @@ export class ChatEngine {
     }
     if (this.active && this.sessions.size === 0) this.active = undefined;
     u.friends = u.friends.filter((f) => f.public.id !== id);
-    u.groups = u.groups.map((g) => ({ ...g, members: g.members.filter((m) => m !== id) }));
+    u.groups = u.groups.flatMap((g) => {
+      const members = g.members.filter((memberId) => memberId !== id);
+      const memberIds = this.groupMemberIds(g).filter(
+        (memberId) => memberId !== id,
+      );
+      if (members.length < 2 || memberIds.length < 3) return [];
+      const memberNames = { ...(g.memberNames ?? {}) };
+      delete memberNames[id];
+      return [
+        {
+          ...g,
+          members,
+          memberIds,
+          memberNames,
+        },
+      ];
+    });
     await this.api.saveVault(sealVault(u));
     if (this.unlocked !== u) return;
     this.history = this.history.filter((m) => m.peerId !== id);
@@ -1593,21 +1749,81 @@ export class ChatEngine {
     if (!trimmed || trimmed.length > 60)
       throw new Error("Use a group name between 1 and 60 characters.");
     const members = [...new Set(memberIds)].filter((id) =>
-      u.friends.some((f) => f.public.id === id),
+      u.friends.some((f) => f.public.id === id && f.pairId),
     );
-    if (members.length < 2)
+    if (members.length < 2 || members.length > 49)
       throw new Error("Select at least two contacts to create a group (3+ people total).");
+    if (members.length !== new Set(memberIds).size)
+      throw new Error("Every selected contact must be paired with a 6-digit code.");
+    const creatorId = u.identity.public.id;
+    const memberIdsForGroup = [creatorId, ...members];
+    const memberNames = Object.fromEntries([
+      [creatorId, u.identity.displayName],
+      ...members.map((id) => [id, this.friendById(id)!.displayName]),
+    ]);
+    const createdAt = new Date().toISOString();
     const group: Group = {
       id: randomId(),
       name: trimmed,
       members,
-      createdAt: new Date().toISOString(),
+      createdAt,
+      creatorId,
+      memberIds: memberIdsForGroup,
+      memberNames,
     };
     u.groups = [...u.groups, group];
-    await this.api.saveVault(sealVault(u));
+    try {
+      await this.api.saveVault(sealVault(u));
+    } catch (error) {
+      if (this.unlocked === u)
+        u.groups = u.groups.filter((g) => g.id !== group.id);
+      throw error;
+    }
     if (this.unlocked !== u) return;
     this.selected = { type: "group", id: group.id };
     this.showFullView();
+    const sharedGroup = {
+      id: group.id,
+      name: group.name,
+      creatorId,
+      memberIds: memberIdsForGroup,
+      memberNames,
+      createdAt,
+    };
+    for (const peerId of members) {
+      const friend = this.friendById(peerId)!;
+      const id = randomId();
+      const sentAt = new Date().toISOString();
+      const wire = sealEnvelope(
+        u.identity,
+        friend.public,
+        {
+          type: "mail-group-invite",
+          pairId: friend.pairId!,
+          group: sharedGroup,
+        },
+        id,
+        sentAt,
+      );
+      const message = {
+        id,
+        wire,
+        peerId,
+        from: "me" as const,
+        text: "Group invitation",
+        sentAt,
+        groupId: group.id,
+        mailKind: "group-invite" as const,
+      };
+      await this.api.outgoing(
+        archiveMessage(u.identity, peerId, message, false),
+      );
+      if (this.unlocked !== u)
+        throw new Error("The vault locked before all group invites were queued.");
+      this.history = [...this.history, { ...message, delivered: false }];
+      this.transmitMail(wire);
+    }
+    this.publish({ messages: this.visibleMessages() });
   }
   async removeGroup(groupId: string): Promise<void> {
     const u = this.unlocked;
