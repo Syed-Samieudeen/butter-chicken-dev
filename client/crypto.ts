@@ -351,7 +351,8 @@ export async function unlockVault(
       key,
       salt: vault.salt,
     };
-  } catch {
+  } catch (error) {
+    console.error("Vault unlock failed:", error);
     sodium.memzero(key);
     throw new Error(
       "Could not unlock. Check your passphrase or restore your original data.",
