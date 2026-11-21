@@ -153,11 +153,11 @@ Theme and auto-lock preferences are stored in this browser's localStorage for it
 | Remove trusted device | Delete friend trust and local history; keep own identity                                          |
 | Reset identity        | Delete vault, keys, history and replay IDs; keep a random non-authenticating discovery routing ID |
 
-The other computer's data is not remotely deleted. A lost passphrase cannot be recovered through an account. The UI provides explicit reset, including a forgotten-passphrase path. After identity reset/removal, both people remove old trust and compare a new pairing.
+The other computer's data is not remotely deleted. While unlocked, Settings lets you change your passphrase. A separate random recovery key can set a new passphrase if the current one is forgotten; save it somewhere private and separate from this computer. If both the passphrase and recovery key are lost, the vault cannot be decrypted. Reset is destructive and does not recover the old identity or conversation. After identity reset/removal, both people remove old trust and compare a new pairing.
 
 ### Backup and updates
 
-Stop with Ctrl+C before copying the **entire dedicated data directory** to a protected backup. It includes encrypted keys/history and optional configuration; keep the passphrase separately protected. Browser UI preferences are not included. Restoring an old database can restore deleted messages/trust and roll back replay records. There is no anti-rollback hardware guarantee. Do not copy live SQLite files or publish a backup.
+Stop with Ctrl+C before copying the **entire dedicated data directory** to a protected backup. It includes the encrypted vault, recovery-encrypted copy, history and optional configuration; keep both the passphrase and recovery key separately protected. Browser UI preferences are not included. Restoring an old database can restore deleted messages/trust and roll back replay records. There is no anti-rollback hardware guarantee. Do not copy live SQLite files or publish a backup.
 
 Ordinary global reinstall/update replaces package files, **not** the user-data directory. Back up first, stop the running process, update from your trusted source and restart. Do not use `npm uninstall` as a history-reset mechanism. Future schema changes require reviewed migration instructions; this v1 release does not promise compatibility with arbitrary future builds.
 

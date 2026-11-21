@@ -146,6 +146,7 @@ export default function App() {
   const [confirm, setConfirm] = useState<ConfirmKind>();
   const [toast, setToast] = useState("");
   const [showGroup, setShowGroup] = useState(false);
+  const [showRecoverySetup, setShowRecoverySetup] = useState(false);
   useEffect(() => {
     engine
       .init()
@@ -184,6 +185,10 @@ export default function App() {
     const timer = setTimeout(() => setToast(""), 4500);
     return () => clearTimeout(timer);
   }, [toast]);
+  useEffect(() => {
+    if (s.mode === "ready" && !s.locked && s.recoverySetupNeeded)
+      setShowRecoverySetup(true);
+  }, [s.mode, s.locked, s.recoverySetupNeeded]);
   const navigation: {
     view: View;
     label: string;
@@ -356,6 +361,10 @@ export default function App() {
           <AuthGate
             mode={s.mode}
             reset={() => setConfirm("reset")}
+            recover={(code, passphrase) =>
+              engine.recoverWithKey(code, passphrase)
+            }
+            onCreated={() => setShowRecoverySetup(true)}
             navigate={navigate}
           />
         ) : view === "chat" ? (
@@ -398,6 +407,14 @@ export default function App() {
       ) : null}
       {showGroup ? (
         <GroupDialog friends={s.friends} onClose={() => setShowGroup(false)} onCreate={async (name, members) => { await engine.createGroup(name, members); setShowGroup(false); setView("chat"); setToast("Group created."); }} />
+      ) : null}
+      {showRecoverySetup && s.mode === "ready" && !s.locked ? (
+        <RecoveryKeyDialog
+          onClose={() => {
+            engine.dismissRecoverySetup();
+            setShowRecoverySetup(false);
+          }}
+        />
       ) : null}
       {confirm ? (
         <ConfirmDialog kind={confirm} close={() => setConfirm(undefined)} selectedPeerId={s.selected?.type === "friend" ? s.selected.id : undefined} />
@@ -463,6 +480,13 @@ function LockScreen({ friendName }: { friendName?: string }) {
           {busy ? <LoaderCircle className="spin" size={18} /> : <LockKeyhole size={18} />}
           {busy ? "Checking…" : "Unlock"}
         </button>
+        <button
+          type="button"
+          className="text-button"
+          onClick={() => engine.lock()}
+        >
+          Forgot it? Sign out and use recovery key
+        </button>
       </form>
     </div>
   );
@@ -471,29 +495,40 @@ function LockScreen({ friendName }: { friendName?: string }) {
 function AuthGate({
   mode,
   reset,
+  recover,
+  onCreated,
   navigate,
 }: {
   mode: "new" | "locked";
   reset: () => void;
+  recover: (code: string, passphrase: string) => Promise<void>;
+  onCreated: () => void;
   navigate: Navigate;
 }) {
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [repeat, setRepeat] = useState("");
   const [show, setShow] = useState(false);
+  const [recovering, setRecovering] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setError("");
-    if (mode === "new" && password !== repeat)
+    if ((mode === "new" || recovering) && password !== repeat)
       return setError("The passphrases don’t match.");
     setBusy(true);
     try {
-      if (mode === "new") await engine.create(name, password);
+      if (mode === "new") {
+        await engine.create(name, password);
+        onCreated();
+      }
+      else if (recovering) await recover(recoveryCode, password);
       else await engine.unlock(password);
       setPassword("");
       setRepeat("");
+      setRecoveryCode("");
     } catch (e) {
       setError(e instanceof Error ? e.message : "Could not open your identity");
     } finally {
@@ -556,7 +591,9 @@ function AuthGate({
         <p>
           {mode === "new"
             ? "Create your identity on this device. A passphrase locks your keys and conversation."
-            : "Unlock your identity and local conversation. Your passphrase stays in this browser."}
+            : recovering
+              ? "Use your saved recovery key to set a new passphrase. Your identity and local history will be preserved."
+              : "Unlock your identity and local conversation. Your passphrase stays in this browser."}
         </p>
         {mode === "new" ? (
           <label>
@@ -571,6 +608,24 @@ function AuthGate({
             />
           </label>
         ) : null}
+        {mode === "locked" && recovering ? (
+          <label>
+            Recovery key
+            <input
+              value={recoveryCode}
+              onChange={(e) => setRecoveryCode(e.target.value)}
+              placeholder="Paste your saved recovery key"
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+              required
+            />
+            <small className="field-hint">
+              This is different from your passphrase. Save it separately from this device.
+            </small>
+          </label>
+        ) : null}
+        {!recovering ? (
         <label>
           Passphrase
           <div className="password-field">
@@ -596,10 +651,11 @@ function AuthGate({
             </button>
           </div>
         </label>
+        ) : null}
         {mode === "new" ? (
           <>
             <small className="field-hint">
-              At least 12 characters. There is no account recovery.
+              At least 12 characters. Save the recovery key shown after setup.
             </small>
             <label>
               Confirm passphrase
@@ -615,14 +671,41 @@ function AuthGate({
             </label>
           </>
         ) : null}
+        {mode === "locked" && recovering ? (
+          <>
+            <label>
+              New passphrase
+              <input
+                type={show ? "text" : "password"}
+                value={password}
+                onChange={(e) => setPassword(e.target.value)}
+                minLength={12}
+                maxLength={512}
+                autoComplete="new-password"
+                required
+              />
+            </label>
+            <label>
+              Confirm new passphrase
+              <input
+                type={show ? "text" : "password"}
+                value={repeat}
+                onChange={(e) => setRepeat(e.target.value)}
+                maxLength={512}
+                autoComplete="new-password"
+                required
+              />
+            </label>
+          </>
+        ) : null}
         <ActionError message={error} />
         <button type="submit" className="button primary full" disabled={busy}>
           {busy ? <LoaderCircle className="spin" size={18} /> : <LockKeyhole size={18} />}
           {busy
-            ? "Opening your vault…"
+            ? recovering ? "Recovering your vault..." : "Opening your vault…"
             : mode === "new"
               ? "Create identity"
-              : "Unlock your space"}
+              : recovering ? "Recover and set passphrase" : "Unlock your space"}
         </button>
         <div className="auth-foot">
           {mode === "new" ? (
@@ -631,9 +714,25 @@ function AuthGate({
               <span>No account. No sign-up. Your keys stay on this device.</span>
             </>
           ) : (
-            <button type="button" className="text-button" onClick={reset}>
-              Lost your passphrase? Reset this device
-            </button>
+            <>
+              <button
+                type="button"
+                className="text-button"
+                onClick={() => {
+                  setRecovering((value) => !value);
+                  setError("");
+                  setPassword("");
+                  setRepeat("");
+                }}
+              >
+                {recovering ? "Back to unlock" : "Forgot passphrase? Use recovery key"}
+              </button>
+              {!recovering ? (
+                <button type="button" className="text-button" onClick={reset}>
+                  No recovery key? Reset this device
+                </button>
+              ) : null}
+            </>
           )}
         </div>
         <div className="policy-links">
@@ -1210,6 +1309,49 @@ function SettingsView({
   confirm: (kind: ConfirmKind) => void;
   navigate: Navigate;
 }) {
+  const [showRecovery, setShowRecovery] = useState(false);
+  const [recoveryCode, setRecoveryCode] = useState("");
+  const [changingPassphrase, setChangingPassphrase] = useState(false);
+  const [currentPassphrase, setCurrentPassphrase] = useState("");
+  const [newPassphrase, setNewPassphrase] = useState("");
+  const [repeatPassphrase, setRepeatPassphrase] = useState("");
+  const [passphraseError, setPassphraseError] = useState("");
+  const [passphraseNotice, setPassphraseNotice] = useState("");
+  const [savingPassphrase, setSavingPassphrase] = useState(false);
+  const showRecoveryKey = () => {
+    try {
+      setRecoveryCode(engine.recoveryCode());
+      setShowRecovery(true);
+    } catch (error) {
+      setPassphraseError(
+        error instanceof Error ? error.message : "Could not show recovery key.",
+      );
+    }
+  };
+  const saveNewPassphrase = async (event: FormEvent) => {
+    event.preventDefault();
+    setPassphraseError("");
+    setPassphraseNotice("");
+    if (newPassphrase !== repeatPassphrase) {
+      setPassphraseError("The new passphrases don't match.");
+      return;
+    }
+    setSavingPassphrase(true);
+    try {
+      await engine.changePassphrase(currentPassphrase, newPassphrase);
+      setCurrentPassphrase("");
+      setNewPassphrase("");
+      setRepeatPassphrase("");
+      setChangingPassphrase(false);
+      setPassphraseNotice("Passphrase changed. Your identity and history are unchanged.");
+    } catch (error) {
+      setPassphraseError(
+        error instanceof Error ? error.message : "Could not change passphrase.",
+      );
+    } finally {
+      setSavingPassphrase(false);
+    }
+  };
   return (
     <section className="page-scroll settings-page">
       <div className="page-heading">
@@ -1244,6 +1386,123 @@ function SettingsView({
             Lock now
           </button>
         </div>
+      </div>
+      <div className="card">
+        <div className="panel-title">
+          <h3>Passphrase &amp; recovery</h3>
+          <KeyRound size={20} />
+        </div>
+        <p>
+          Change your passphrase while you are unlocked. The recovery key lets
+          you set a new passphrase if you forget this one; it cannot be
+          regenerated after you lose access to both.
+        </p>
+        <div className="setting-row">
+          <div>
+            <strong>Recovery key</strong>
+            <p>Keep a separate copy somewhere private and offline.</p>
+          </div>
+          <button className="button secondary" onClick={showRecoveryKey}>
+            Show recovery key
+          </button>
+        </div>
+        {showRecovery ? (
+          <div className="recovery-key-box">
+            <strong>Save this key somewhere separate from your device</strong>
+            <code>{recoveryCode}</code>
+            <div className="inline-actions">
+              <button
+                className="button secondary"
+                onClick={() => {
+                  if (!navigator.clipboard?.writeText) {
+                    setPassphraseError(
+                      "Clipboard unavailable. Select and copy the key manually.",
+                    );
+                    return;
+                  }
+                  void navigator.clipboard
+                    .writeText(recoveryCode)
+                    .then(() => setPassphraseNotice("Recovery key copied. Store it safely."))
+                    .catch(() =>
+                      setPassphraseError("Copy failed. Select and copy the key manually."),
+                    );
+                }}
+              >
+                Copy recovery key
+              </button>
+              <button
+                className="text-button"
+                onClick={() => setShowRecovery(false)}
+              >
+                Hide
+              </button>
+            </div>
+          </div>
+        ) : null}
+        <div className="setting-row">
+          <div>
+            <strong>Change passphrase</strong>
+            <p>Keep it private and use at least 12 characters.</p>
+          </div>
+          <button
+            className="button secondary"
+            onClick={() => {
+              setChangingPassphrase((value) => !value);
+              setPassphraseError("");
+              setPassphraseNotice("");
+            }}
+          >
+            {changingPassphrase ? "Cancel" : "Change passphrase"}
+          </button>
+        </div>
+        {changingPassphrase ? (
+          <form className="passphrase-change-form" onSubmit={saveNewPassphrase}>
+            <label>
+              Current passphrase
+              <input
+                type="password"
+                value={currentPassphrase}
+                onChange={(e) => setCurrentPassphrase(e.target.value)}
+                autoComplete="current-password"
+                maxLength={512}
+                required
+              />
+            </label>
+            <label>
+              New passphrase
+              <input
+                type="password"
+                value={newPassphrase}
+                onChange={(e) => setNewPassphrase(e.target.value)}
+                autoComplete="new-password"
+                minLength={12}
+                maxLength={512}
+                required
+              />
+            </label>
+            <label>
+              Confirm new passphrase
+              <input
+                type="password"
+                value={repeatPassphrase}
+                onChange={(e) => setRepeatPassphrase(e.target.value)}
+                autoComplete="new-password"
+                maxLength={512}
+                required
+              />
+            </label>
+            <ActionError message={passphraseError} />
+            <button
+              className="button primary"
+              type="submit"
+              disabled={savingPassphrase}
+            >
+              {savingPassphrase ? "Saving..." : "Save new passphrase"}
+            </button>
+          </form>
+        ) : null}
+        {passphraseNotice ? <p className="success-note">{passphraseNotice}</p> : null}
+        {!changingPassphrase ? <ActionError message={passphraseError} /> : null}
       </div>
       <div className="card">
         <div className="panel-title">
@@ -1306,6 +1565,64 @@ function SettingsView({
         </InternalLink>
       </div>
     </section>
+  );
+}
+
+function RecoveryKeyDialog({ onClose }: { onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    ref.current?.showModal();
+    return () => ref.current?.close();
+  }, []);
+  let code = "";
+  try {
+    code = engine.recoveryCode();
+  } catch {
+    // The parent hides this dialog while locked.
+  }
+  return (
+    <dialog
+      className="confirm-dialog card recovery-dialog"
+      ref={ref}
+      aria-labelledby="recovery-title"
+      onCancel={(event) => {
+        event.preventDefault();
+        onClose();
+      }}
+    >
+      <div className="card-icon">
+        <KeyRound size={24} />
+      </div>
+      <h3 id="recovery-title">Save your recovery key</h3>
+      <p>
+        If you forget your passphrase, this key can set a new one without
+        deleting your identity or history. It is shown only on this device.
+        Store it somewhere private and separate from this computer.
+      </p>
+      <code className="recovery-code">{code}</code>
+      <ActionError message={error} />
+      <div className="inline-actions">
+        <button
+          className="button secondary"
+          onClick={() => {
+            if (!navigator.clipboard?.writeText) {
+              setError("Clipboard unavailable. Select and copy the key manually.");
+              return;
+            }
+            void navigator.clipboard
+              .writeText(code)
+              .then(() => setError(""))
+              .catch(() => setError("Copy failed. Select and copy the key manually."));
+          }}
+        >
+          Copy key
+        </button>
+        <button className="button primary" onClick={onClose}>
+          Continue
+        </button>
+      </div>
+    </dialog>
   );
 }
 

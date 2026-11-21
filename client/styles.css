@@ -1720,6 +1720,60 @@ select {
   font-size: 0.875rem;
 }
 
+.recovery-key-box {
+  display: grid;
+  gap: 12px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+  padding: 16px;
+  margin: 4px 0 16px;
+}
+
+.recovery-key-box > strong {
+  font-size: 0.875rem;
+}
+
+.recovery-key-box code {
+  display: block;
+  overflow-wrap: anywhere;
+  color: var(--accent);
+  font-size: 0.95rem;
+  user-select: all;
+}
+
+.recovery-code {
+  display: block;
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--input);
+  color: var(--accent);
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.recovery-dialog {
+  max-width: 520px;
+}
+
+.recovery-dialog .inline-actions {
+  justify-content: flex-end;
+}
+
+.passphrase-change-form {
+  display: grid;
+  gap: 14px;
+  padding-top: 8px;
+}
+
+.success-note {
+  margin-top: 12px;
+  color: var(--green);
+  font-size: 0.875rem;
+}
+
 .danger-zone {
   border-color: var(--red-border);
 }

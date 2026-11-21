@@ -6,6 +6,11 @@ import {
   createVault,
   unlockVault,
   sealVault,
+  changeVaultPassphrase,
+  recoverVault,
+  openLocal,
+  sealLocal,
+  vaultAAD,
   wipe,
   makeHello,
   verifyHello,
@@ -100,6 +105,76 @@ test("encrypted passphrase vault persists identities, rejects wrong password and
   wipe(unlocked);
   assert.ok(unlocked.key.every((x) => x === 0));
   wipe(reopened);
+});
+test("passphrase can be changed or recovered with the independent recovery key without changing identity", async () => {
+  const oldPassphrase = "old passphrase for recovery test";
+  const newPassphrase = "new passphrase for recovery test";
+  const { unlocked, vault } = await createVault("Recovery fixture", oldPassphrase);
+  const recoveryCode = Buffer.from(unlocked.recoveryKey).toString("base64url");
+  let changedKey: Uint8Array | undefined;
+  let recovered: Awaited<ReturnType<typeof recoverVault>>["unlocked"] | undefined;
+  let reopened: Awaited<ReturnType<typeof unlockVault>> | undefined;
+  let changedUnlocked: Awaited<ReturnType<typeof unlockVault>> | undefined;
+  try {
+    const changed = await changeVaultPassphrase(unlocked, newPassphrase);
+    changedKey = changed.key;
+    changedUnlocked = await unlockVault(changed.vault, newPassphrase);
+    assert.deepEqual(changedUnlocked.identity.public, unlocked.identity.public);
+    await assert.rejects(() => unlockVault(changed.vault, oldPassphrase));
+    await assert.rejects(() => recoverVault(changed.vault, "wrong-key", newPassphrase));
+
+    const result = await recoverVault(vault, recoveryCode, newPassphrase);
+    recovered = result.unlocked;
+    assert.deepEqual(recovered.identity.public, unlocked.identity.public);
+    reopened = await unlockVault(result.vault, newPassphrase);
+    assert.deepEqual(reopened.identity.public, unlocked.identity.public);
+    assert.equal(
+      Buffer.from(reopened.recoveryKey).toString("base64url"),
+      recoveryCode,
+    );
+  } finally {
+    if (changedKey) changedKey.fill(0);
+    wipe(unlocked);
+    if (recovered) wipe(recovered);
+    if (reopened) wipe(reopened);
+    if (changedUnlocked) wipe(changedUnlocked);
+  }
+});
+test("legacy v1 vaults migrate to recovery support after their original passphrase unlocks", async () => {
+  const passphrase = "legacy vault migration test passphrase";
+  const created = await createVault("Legacy fixture", passphrase);
+  const payload = openLocal(
+    created.unlocked.key,
+    created.vault.data,
+    vaultAAD(created.vault.salt),
+  ) as Record<string, unknown>;
+  delete payload.recoveryKey;
+  delete payload.friends;
+  delete payload.groups;
+  const legacyVault = {
+    ...created.vault,
+    data: sealLocal(created.unlocked.key, payload, vaultAAD(created.vault.salt)),
+  };
+  delete (legacyVault as { recovery?: unknown }).recovery;
+  let migrated: Awaited<ReturnType<typeof unlockVault>> | undefined;
+  let recovered: Awaited<ReturnType<typeof recoverVault>>["unlocked"] | undefined;
+  try {
+    migrated = await unlockVault(legacyVault, passphrase);
+    const migratedVault = sealVault(migrated);
+    assert.ok(migratedVault.recovery);
+    const recoveryCode = Buffer.from(migrated.recoveryKey).toString("base64url");
+    const result = await recoverVault(
+      migratedVault,
+      recoveryCode,
+      "replacement legacy passphrase",
+    );
+    recovered = result.unlocked;
+    assert.deepEqual(recovered.identity.public, created.unlocked.identity.public);
+  } finally {
+    wipe(created.unlocked);
+    if (migrated) wipe(migrated);
+    if (recovered) wipe(recovered);
+  }
 });
 test("encrypted archives bind their record identity and metadata", () => {
   const a = createIdentity("Alex");

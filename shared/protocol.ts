@@ -73,6 +73,7 @@ export const VaultSchema = z
     ops: z.literal(2),
     memory: z.literal(67_108_864),
     data: EncryptedBlobSchema,
+    recovery: EncryptedBlobSchema.optional(),
   })
   .strict();
 export type Vault = z.infer<typeof VaultSchema>;

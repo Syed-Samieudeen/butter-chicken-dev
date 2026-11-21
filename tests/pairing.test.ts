@@ -156,6 +156,8 @@ test("screen lock keeps the relay connection, hides content until the passphrase
     await engine.init();
     await engine.create("Alex", passphrase);
     await wait(() => !!engine.getSnapshot().relayConnected, "Relay connected");
+    assert.equal(engine.getSnapshot().recoverySetupNeeded, true);
+    engine.dismissRecoverySetup();
     engine.lockScreen();
     const locked = engine.getSnapshot();
     assert.equal(locked.locked, true);
@@ -169,6 +171,23 @@ test("screen lock keeps the relay connection, hides content until the passphrase
     assert.equal(open.locked, false);
     assert.equal(open.self?.displayName, "Alex");
     assert.equal(open.relayConnected, true);
+
+    const identityId = open.self!.public.id;
+    const recoveryKey = engine.recoveryCode();
+    const changedPassphrase = "new passphrase after exposed test";
+    await engine.changePassphrase(passphrase, changedPassphrase);
+    engine.lock();
+    await engine.unlock(changedPassphrase);
+    assert.equal(engine.getSnapshot().self?.public.id, identityId);
+
+    const recoveredPassphrase = "recovered passphrase for test";
+    engine.lock();
+    await engine.recoverWithKey(recoveryKey, recoveredPassphrase);
+    assert.equal(engine.getSnapshot().self?.public.id, identityId);
+    engine.lock();
+    await assert.rejects(() => engine.unlock(changedPassphrase));
+    await engine.unlock(recoveredPassphrase);
+    assert.equal(engine.getSnapshot().self?.public.id, identityId);
   } finally {
     engine.dispose();
     await app.close();

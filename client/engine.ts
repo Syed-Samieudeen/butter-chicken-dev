@@ -16,6 +16,7 @@ import {
   archiveMessage,
   bytes,
   base64,
+  changeVaultPassphrase,
   cryptoReady,
   createVault,
   makeHello,
@@ -27,6 +28,7 @@ import {
   PrivatePayloadSchema,
   randomChallenge,
   randomId,
+  recoverVault,
   sameIdentity,
   sealEnvelope,
   sealVault,
@@ -193,6 +195,7 @@ export interface Snapshot {
   invitation?: { code?: string; expires: number };
   joining?: boolean;
   pending?: PendingPair;
+  recoverySetupNeeded?: boolean;
   notice?: string;
   warning?: string;
   lastSeen?: string;
@@ -220,6 +223,7 @@ export class ChatEngine {
   private invitation?: { invitation: Invitation; code?: string };
   private invitationUsed = false;
   private history: ChatMessage[] = [];
+  private recoverySetupNeeded = false;
   private selected: SelectedConversation | null = null;
   private uiLocked = false;
   private lastActivity = Date.now();
@@ -257,6 +261,75 @@ export class ChatEngine {
     next.locked = this.uiLocked;
     this.snapshot = next;
     for (const listener of this.listeners) listener();
+  }
+  recoveryCode(): string {
+    if (!this.unlocked || this.uiLocked)
+      throw new Error("Unlock your identity to view its recovery key.");
+    return base64(this.unlocked.recoveryKey);
+  }
+  dismissRecoverySetup(): void {
+    this.recoverySetupNeeded = false;
+    this.publish({ recoverySetupNeeded: false });
+  }
+  async changePassphrase(
+    currentPassphrase: string,
+    newPassphrase: string,
+  ): Promise<void> {
+    const u = this.unlocked;
+    if (!u || this.uiLocked) throw new Error("Unlock your identity first.");
+    if (!(await verifyPassphrase(u, currentPassphrase)))
+      throw new Error("The current passphrase is not correct.");
+    if (this.unlocked !== u) throw new Error("Session changed. Try again.");
+    const next = await changeVaultPassphrase(u, newPassphrase);
+    try {
+      await this.api.saveVault(next.vault);
+      if (this.unlocked !== u) throw new Error("Session changed. Try again.");
+      sodium.memzero(u.key);
+      u.key = next.key;
+      u.salt = next.salt;
+      try {
+        sessionStorage.setItem("bc:v1:sessionKey", base64(u.key));
+        sessionStorage.setItem("bc:v1:salt", u.salt);
+      } catch {}
+    } catch (error) {
+      if (u.key !== next.key) sodium.memzero(next.key);
+      throw error;
+    }
+  }
+  async recoverWithKey(
+    recoveryCode: string,
+    newPassphrase: string,
+  ): Promise<void> {
+    if (this.unlocked) throw new Error("Lock the current identity before recovery.");
+    const epoch = this.epoch;
+    const vault = await this.api.vault();
+    if (!vault) throw new Error("No identity found.");
+    const result = await recoverVault(vault, recoveryCode, newPassphrase);
+    if (this.epoch !== epoch) {
+      wipe(result.unlocked);
+      throw new Error("Session changed. Try recovery again.");
+    }
+    try {
+      await this.api.saveVault(result.vault);
+    } catch (error) {
+      wipe(result.unlocked);
+      throw error;
+    }
+    if (this.epoch !== epoch) {
+      wipe(result.unlocked);
+      throw new Error("Session changed. Try recovery again.");
+    }
+    this.unlocked = result.unlocked;
+    try {
+      sessionStorage.setItem("bc:v1:sessionKey", base64(result.unlocked.key));
+      sessionStorage.setItem("bc:v1:salt", result.unlocked.salt);
+    } catch {}
+    try {
+      await this.activate();
+    } catch (error) {
+      if (this.unlocked === result.unlocked) this.lock();
+      throw error;
+    }
   }
   private friendById(id: string): Friend | undefined {
     return this.unlocked?.friends.find((f) => f.public.id === id);
@@ -325,6 +398,7 @@ export class ChatEngine {
       selected: this.selected ?? undefined,
       friend: selectedFriend,
       messages: this.conversationMessages(),
+      recoverySetupNeeded: this.recoverySetupNeeded,
       invitation: this.invitation
         ? { code: this.invitation.code, expires: this.invitation.invitation.expires }
         : undefined,
@@ -383,33 +457,42 @@ export class ChatEngine {
             const publicIdentity = validateIdentity(payload.identity.public);
             const boxSecret = bytes(payload.identity.boxSecret, 32);
             const signSecret = bytes(payload.identity.signSecret, 64);
-            const archiveKey = bytes(payload.identity.archiveKey, 32);
-            if (
-              base64(sodium.crypto_scalarmult_base(boxSecret)) ===
-                publicIdentity.boxKey &&
-              base64(sodium.crypto_sign_ed25519_sk_to_pk(signSecret)) ===
-                publicIdentity.signKey
-            ) {
-              if (payload.friend) validateIdentity(payload.friend.public);
-              const friends = payload.friends ?? (payload.friend ? [payload.friend] : []);
-              for (const f of friends) validateIdentity(f.public);
-              this.unlocked = {
-                identity: {
-                  public: publicIdentity,
-                  displayName: payload.identity.displayName,
-                  boxSecret,
-                  signSecret,
-                  archiveKey,
-                  sequence: payload.identity.sequence ?? 0,
-                },
-                key,
-                salt: vault.salt,
-                friends,
-                groups: payload.groups ?? [],
-              };
-              this.publish({ mode: "ready", relayUrl: this.relayUrl });
-              await this.activate();
-              return;
+              const archiveKey = bytes(payload.identity.archiveKey, 32);
+              if (
+                base64(sodium.crypto_scalarmult_base(boxSecret)) ===
+                  publicIdentity.boxKey &&
+                base64(sodium.crypto_sign_ed25519_sk_to_pk(signSecret)) ===
+                  publicIdentity.signKey
+              ) {
+                if (payload.friend) validateIdentity(payload.friend.public);
+                const friends = payload.friends ?? (payload.friend ? [payload.friend] : []);
+                for (const f of friends) validateIdentity(f.public);
+                const recoveryKey = payload.recoveryKey
+                  ? bytes(payload.recoveryKey, 32)
+                  : sodium.randombytes_buf(32);
+                const unlocked: UnlockedVault = {
+                  identity: {
+                    public: publicIdentity,
+                    displayName: payload.identity.displayName,
+                    boxSecret,
+                    signSecret,
+                    archiveKey,
+                    sequence: payload.identity.sequence ?? 0,
+                  },
+                  key,
+                  recoveryKey,
+                  salt: vault.salt,
+                  friends,
+                  groups: payload.groups ?? [],
+                };
+                if (!vault.recovery || !payload.recoveryKey)
+                  await this.api.saveVault(sealVault(unlocked));
+                if (!vault.recovery || !payload.recoveryKey)
+                  this.recoverySetupNeeded = true;
+                this.unlocked = unlocked;
+                this.publish({ mode: "ready", relayUrl: this.relayUrl });
+                await this.activate();
+                return;
             }
           }
         }
@@ -446,6 +529,8 @@ export class ChatEngine {
       throw new Error("Session changed. Unlock again.");
     }
     this.unlocked = unlocked;
+    this.recoverySetupNeeded = true;
+    if (!vault.recovery) await this.api.saveVault(sealVault(unlocked));
     try {
       sessionStorage.setItem("bc:v1:sessionKey", base64(unlocked.key));
       sessionStorage.setItem("bc:v1:salt", unlocked.salt);
@@ -465,13 +550,18 @@ export class ChatEngine {
     }
     this.unlocked = unlocked;
     try {
-      sessionStorage.setItem("bc:v1:sessionKey", base64(unlocked.key));
-      sessionStorage.setItem("bc:v1:salt", unlocked.salt);
-    } catch {}
-    try {
+      if (!vault.recovery) {
+        await this.api.saveVault(sealVault(unlocked));
+        this.recoverySetupNeeded = true;
+      }
+      try {
+        sessionStorage.setItem("bc:v1:sessionKey", base64(unlocked.key));
+        sessionStorage.setItem("bc:v1:salt", unlocked.salt);
+      } catch {}
       await this.activate();
     } catch (error) {
-      this.lock();
+      if (this.unlocked === unlocked) this.lock();
+      else wipe(unlocked);
       throw error;
     }
   }
@@ -612,6 +702,7 @@ export class ChatEngine {
     this.requests.clear();
     this.history = [];
     this.selected = null;
+    this.recoverySetupNeeded = false;
     this.active = undefined;
     this.candidate = undefined;
     this.invitation = undefined;
@@ -624,6 +715,7 @@ export class ChatEngine {
       friends: [],
       groups: [],
       selected: undefined,
+      recoverySetupNeeded: false,
       friend: undefined,
       messages: [],
       pending: undefined,

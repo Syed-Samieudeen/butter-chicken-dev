@@ -75,6 +75,7 @@ export interface UnlockedVault {
   friends: Friend[];
   groups: Group[];
   key: Uint8Array;
+  recoveryKey: Uint8Array;
   salt: string;
 }
 export const PrivatePayloadSchema = z
@@ -92,6 +93,7 @@ export const PrivatePayloadSchema = z
     friend: FriendSchema.optional(),
     friends: z.array(FriendSchema).optional(),
     groups: z.array(GroupSchema).optional(),
+    recoveryKey: z.string().length(43).regex(/^[A-Za-z0-9_-]+$/).optional(),
   })
   .strict();
 export const ChatMessageSchema = z
@@ -266,29 +268,38 @@ export function vaultAAD(salt: string) {
     67_108_864,
   ];
 }
-export function sealVault(unlocked: UnlockedVault): Vault {
+function recoveryAAD(salt: string) {
+  return ["ButterChicken/recovery/v1", salt];
+}
+function privatePayload(unlocked: UnlockedVault) {
   const i = unlocked.identity;
+  return {
+    identity: {
+      public: i.public,
+      displayName: i.displayName,
+      boxSecret: base64(i.boxSecret),
+      signSecret: base64(i.signSecret),
+      archiveKey: base64(i.archiveKey),
+      sequence: i.sequence ?? 0,
+    },
+    friends: unlocked.friends,
+    groups: unlocked.groups,
+    recoveryKey: base64(unlocked.recoveryKey),
+  };
+}
+export function sealVault(unlocked: UnlockedVault): Vault {
+  const payload = privatePayload(unlocked);
   return {
     version: 1,
     kdf: "argon2id13",
     salt: unlocked.salt,
     ops: 2,
     memory: 67_108_864,
-    data: sealLocal(
-      unlocked.key,
-      {
-        identity: {
-          public: i.public,
-          displayName: i.displayName,
-          boxSecret: base64(i.boxSecret),
-          signSecret: base64(i.signSecret),
-          archiveKey: base64(i.archiveKey),
-          sequence: i.sequence ?? 0,
-        },
-        friends: unlocked.friends,
-        groups: unlocked.groups,
-      },
-      vaultAAD(unlocked.salt),
+    data: sealLocal(unlocked.key, payload, vaultAAD(unlocked.salt)),
+    recovery: sealLocal(
+      unlocked.recoveryKey,
+      payload,
+      recoveryAAD(unlocked.salt),
     ),
   };
 }
@@ -301,14 +312,100 @@ export async function createVault(
     throw new Error("Choose a passphrase of 12 to 512 characters");
   const salt = base64(sodium.randombytes_buf(16));
   const key = await derive(passphrase, salt);
+  const recoveryKey = sodium.randombytes_buf(32);
   const unlocked: UnlockedVault = {
     identity: createIdentity(name),
     friends: [],
     groups: [],
     key,
+    recoveryKey,
     salt,
   };
   return { unlocked, vault: sealVault(unlocked) };
+}
+
+/** Rewrap an existing vault with a new passphrase without changing identity or history keys. */
+export async function changeVaultPassphrase(
+  unlocked: UnlockedVault,
+  passphrase: string,
+): Promise<{ key: Uint8Array; salt: string; vault: Vault }> {
+  await cryptoReady;
+  if (passphrase.length < 12 || passphrase.length > 512)
+    throw new Error("Choose a passphrase of 12 to 512 characters");
+  const salt = base64(sodium.randombytes_buf(16));
+  const key = await derive(passphrase, salt);
+  try {
+    const next = { ...unlocked, key, salt };
+    return { key, salt, vault: sealVault(next) };
+  } catch (error) {
+    sodium.memzero(key);
+    throw error;
+  }
+}
+
+/** Recover a vault using its independent random recovery key and set a new passphrase. */
+export async function recoverVault(
+  value: unknown,
+  recoveryCode: string,
+  newPassphrase: string,
+): Promise<{ unlocked: UnlockedVault; vault: Vault }> {
+  await cryptoReady;
+  if (newPassphrase.length < 12 || newPassphrase.length > 512)
+    throw new Error("Choose a passphrase of 12 to 512 characters");
+  const vault = VaultSchema.parse(value);
+  if (!vault.recovery)
+    throw new Error("No recovery key is configured for this vault.");
+  let recoveryKey: Uint8Array | undefined;
+  let key: Uint8Array | undefined;
+  try {
+    recoveryKey = bytes(recoveryCode.trim().replace(/\s/g, ""), 32);
+    const payload = PrivatePayloadSchema.parse(
+      openLocal(recoveryKey, vault.recovery, recoveryAAD(vault.salt)),
+    );
+    const storedRecoveryKey = payload.recoveryKey
+      ? bytes(payload.recoveryKey, 32)
+      : undefined;
+    if (!storedRecoveryKey || !sodium.memcmp(storedRecoveryKey, recoveryKey))
+      throw new Error("Recovery key does not match this vault.");
+    const publicIdentity = validateIdentity(payload.identity.public);
+    const friends = payload.friends ?? (payload.friend ? [payload.friend] : []);
+    for (const friend of friends) validateIdentity(friend.public);
+    const boxSecret = bytes(payload.identity.boxSecret, 32);
+    const signSecret = bytes(payload.identity.signSecret, 64);
+    const archiveKey = bytes(payload.identity.archiveKey, 32);
+    if (
+      base64(sodium.crypto_scalarmult_base(boxSecret)) !== publicIdentity.boxKey ||
+      base64(sodium.crypto_sign_ed25519_sk_to_pk(signSecret)) !== publicIdentity.signKey
+    )
+      throw new Error("Invalid identity keys");
+    const salt = base64(sodium.randombytes_buf(16));
+    key = await derive(newPassphrase, salt);
+    const unlocked: UnlockedVault = {
+      identity: {
+        public: publicIdentity,
+        displayName: payload.identity.displayName,
+        boxSecret,
+        signSecret,
+        archiveKey,
+        sequence: payload.identity.sequence ?? 0,
+      },
+      friends,
+      groups: payload.groups ?? [],
+      key,
+      recoveryKey,
+      salt,
+    };
+    const nextVault = sealVault(unlocked);
+    return { unlocked, vault: nextVault };
+  } catch (error) {
+    if (key) sodium.memzero(key);
+    if (recoveryKey) sodium.memzero(recoveryKey);
+    throw new Error(
+      error instanceof Error && error.message === "No recovery key is configured for this vault."
+        ? error.message
+        : "Recovery failed. Check the recovery key and try again.",
+    );
+  }
 }
 export async function unlockVault(
   value: unknown,
@@ -337,6 +434,9 @@ export async function unlockVault(
     for (const g of payload.groups ?? []) {
       if (!Array.isArray(g.members)) throw new Error("Invalid group");
     }
+    const recoveryKey = payload.recoveryKey
+      ? bytes(payload.recoveryKey, 32)
+      : sodium.randombytes_buf(32);
     return {
       identity: {
         public: publicIdentity,
@@ -349,6 +449,7 @@ export async function unlockVault(
       friends,
       groups: payload.groups ?? [],
       key,
+      recoveryKey,
       salt: vault.salt,
     };
   } catch (error) {
@@ -377,6 +478,7 @@ export function wipe(unlocked: UnlockedVault): void {
     unlocked.identity.boxSecret,
     unlocked.identity.signSecret,
     unlocked.identity.archiveKey,
+    unlocked.recoveryKey,
   ])
     sodium.memzero(key);
 }

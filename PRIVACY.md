@@ -20,6 +20,6 @@ History deletion affects one local device and retains replay tombstones. Removin
 
 READ is an authenticated acknowledgement that the active, visible chat UI displayed incoming messages; it does not prove human attention. It adds viewing/timing metadata. There is no opt-out read-receipt setting in this release.
 
-There is no recovery service or password reset that recovers old history. Installing Node/npm dependencies or updating from GitHub contacts their suppliers. Actual operation uses the configured relay, optional LAN, and provider TLS/DNS infrastructure. No OpenAI, Firebase, paid broker or managed database API is used.
+There is no account-based recovery service. The vault includes an independently random recovery key, which the user must save separately; it can set a new passphrase while preserving the encrypted identity and history. Anyone with the vault and its recovery key can access the vault, so keep the key private. If both the passphrase and recovery key are lost, the vault cannot be decrypted. Installing Node/npm dependencies or updating from GitHub contacts their suppliers. Actual operation uses the configured relay and provider TLS/DNS infrastructure. No OpenAI, Firebase, paid broker or managed database API is used.
 
 Updated 7 October 2026. This is the supplied software's behavior, not a promise about a modified version or an unknown relay operator.
