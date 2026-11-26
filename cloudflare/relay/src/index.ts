@@ -269,25 +269,30 @@ export class RelayDurableObject {
 CREATE TABLE IF NOT EXISTS offers(code TEXT PRIMARY KEY,owner TEXT NOT NULL,invitation TEXT NOT NULL,expires INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS mail(sender TEXT,recipient TEXT,id TEXT,pair TEXT,json TEXT,expires INTEGER,PRIMARY KEY(sender,id));
 CREATE TABLE IF NOT EXISTS allowances(a TEXT NOT NULL,b TEXT NOT NULL,expires INTEGER NOT NULL,PRIMARY KEY(a,b));`);
-    // Migrate legacy single-pin schema (owner PRIMARY KEY) to multi-pin (owner,peer).
-    try {
-      const cols = [
-        ...this.state.storage.sql.exec("PRAGMA table_info(pins)"),
-      ] as any[];
-      const ownerPk = Number(cols.find((c: any) => c.name === "owner")?.pk ?? 0);
-      const peerPk = Number(cols.find((c: any) => c.name === "peer")?.pk ?? 0);
-      if (ownerPk === 1 && peerPk === 0) {
-        this.state.storage.sql.exec(`BEGIN IMMEDIATE;
-          CREATE TABLE pins_v2(owner TEXT,peer TEXT NOT NULL,pair TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(owner,peer));
-          INSERT OR IGNORE INTO pins_v2(owner,peer,pair,json) SELECT owner,peer,pair,json FROM pins;
-          DROP TABLE pins;
-          ALTER TABLE pins_v2 RENAME TO pins;
-        COMMIT;`);
-      }
-    } catch {
-      try {
-        this.state.storage.sql.exec("ROLLBACK");
-      } catch {}
+    // Migrate the legacy single-pin table (owner PRIMARY KEY) to multi-pin (owner,peer).
+    // Durable Object SQL rejects BEGIN/COMMIT, so each step is a single statement.
+    // A leftover pins_legacy table from an interrupted run is merged and removed.
+    const columns = [
+      ...this.state.storage.sql.exec("PRAGMA table_info(pins)"),
+    ] as any[];
+    const ownerPk = Number(columns.find((c: any) => c.name === "owner")?.pk ?? 0);
+    const peerPk = Number(columns.find((c: any) => c.name === "peer")?.pk ?? 0);
+    if (ownerPk === 1 && peerPk === 0) {
+      this.state.storage.sql.exec("ALTER TABLE pins RENAME TO pins_legacy");
+      this.state.storage.sql.exec(
+        "CREATE TABLE pins(owner TEXT,peer TEXT NOT NULL,pair TEXT NOT NULL,json TEXT NOT NULL,PRIMARY KEY(owner,peer))",
+      );
+    }
+    const legacy = [
+      ...this.state.storage.sql.exec(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='pins_legacy'",
+      ),
+    ];
+    if (legacy.length) {
+      this.state.storage.sql.exec(
+        "INSERT OR IGNORE INTO pins(owner,peer,pair,json) SELECT owner,peer,pair,json FROM pins_legacy",
+      );
+      this.state.storage.sql.exec("DROP TABLE pins_legacy");
     }
     this.initialized = true;
   }

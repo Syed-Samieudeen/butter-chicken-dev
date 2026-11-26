@@ -87,7 +87,7 @@ const env = {
   ...process.env,
   BC_DATA_DIR: data,
   BC_UI_PORT: String(uiPort),
-  BC_RELAY_URL: "ws://127.0.0.1:9/relay",
+  BC_RELAY_URL: "wss://relay.example.test/relay",
   BC_CONFIG_FILE: join(data, "config.env"),
 };
 let server: ChildProcess | undefined;
@@ -98,11 +98,13 @@ const start = async () => {
     stdio: ["ignore", "pipe", "pipe"],
   });
   let output = "";
+  let stderr = "";
   server.stdout!.on("data", (chunk) => (output += chunk.toString()));
+  server.stderr!.on("data", (chunk) => (stderr += chunk.toString()));
   const deadline = Date.now() + 8000;
   while (!output.includes("Local UI:")) {
     if (server.exitCode !== null || Date.now() > deadline)
-      throw new Error("Installed global launcher failed");
+      throw new Error(`Installed global launcher failed: ${stderr.slice(-2000)}`);
     await new Promise((r) => setTimeout(r, 15));
   }
   assert.ok(output.includes(`http://localhost:${uiPort}`));
